@@ -1,0 +1,56 @@
+EMAIL AUTOMATION DIAGNOSTIC REPORT
+Generated: 2026-06-28 (Asia/Dhaka)
+
+SCOPE
+Diagnosis only. No project rebuild or application repair was performed.
+
+SUMMARY
+Root cause: the installed sender rejects the current Excel layout. The application requires Email, Subject, Body, Status, and SentDate in mail_list.xlsx. The actual mail_list.xlsx headers are name, email, status, and SentDate. Subject and Body exist in the separate mail_body.xlsx file. Validation therefore stops with: Missing Excel columns: Subject, Body.
+
+1. SHORTCUT TARGET
+PASS
+Shortcut: C:\Users\DELL\Desktop\Send Pending Emails Now.lnk
+Target: C:\Users\DELL\AppData\Local\ThePowerPeople\EmailAutomation\SendPendingEmails.exe
+Working directory: C:\Users\DELL\AppData\Local\ThePowerPeople\EmailAutomation
+Arguments: none
+
+2. TARGET EXE
+PASS
+SendPendingEmails.exe exists and is approximately 12.3 MB.
+
+3. MANUAL START
+PASS (process launch)
+The EXE process started and exited normally with exit code 0. No Windows crash was recorded. Because this is a windowed executable, application exceptions are handled through GUI/logging rather than terminal output.
+
+4. APPLICATION ERRORS / DEPENDENCIES
+DEPENDENCIES PASS; APPLICATION VALIDATION FAIL
+The EXE imports only standard Windows DLLs: USER32.dll, COMCTL32.dll, KERNEL32.dll, ADVAPI32.dll, and GDI32.dll. No missing dependency or Windows Application Error event was found.
+The daily application log repeatedly records: Missing Excel columns: Subject, Body.
+
+5. EXCEL PATH
+PATH PASS; SCHEMA FAIL
+F:\CODEX\Email_automation\mail_list.xlsx exists.
+Headers: name, email, status, SentDate
+F:\CODEX\Email_automation\mail_body.xlsx exists.
+Headers: subject, body
+
+6. ENV FILE
+PASS
+C:\Users\DELL\AppData\Local\ThePowerPeople\EmailAutomation\.env exists.
+
+7. SMTP CONFIGURATION
+PASS (configuration presence only)
+EMAIL_ADDRESS and EMAIL_PASSWORD both have non-empty values. Credential values were not printed. SMTP authentication was not attempted because Excel validation fails first.
+
+8. LOGGING
+PASS
+Log folder and 2026-06-28.log exist. Multiple runs produced the same schema-validation error.
+
+9. CAPTURED ERROR
+Missing Excel columns: Subject, Body
+
+10. EXACT ROOT CAUSE
+The shortcut and packaged EXE are not missing or broken. The sender's workbook validation is incompatible with the installed two-workbook data layout: it requires Subject and Body in mail_list.xlsx even though those columns are stored in mail_body.xlsx. Sending aborts before SMTP connection. A windowed/handled failure can make the shortcut appear unresponsive because no console error is shown.
+
+RECOMMENDED REPAIR (NOT PERFORMED)
+Update the application so mail_list.xlsx requires Email, Status, and SentDate, and uses Subject and Body from mail_body.xlsx when they are absent from mail_list.xlsx. Then rebuild and reinstall the executables. Alternatively, adding Subject and Body columns to mail_list.xlsx would satisfy the current build, but would duplicate the intended two-file design.
