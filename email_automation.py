@@ -23,12 +23,14 @@ from dotenv import dotenv_values
 from openpyxl import Workbook, load_workbook
 from account_service import AccountService
 from placeholder_service import PlaceholderService
+from tracking_sync_service import TrackingSynchronizationService, synchronization_is_due
 
 
 APP_NAME = "Email Automation"
 TASK_NAME = "The Power People Daily Email Automation"
 DEFAULT_DATA_DIR = r"F:\CODEX\Email_automation"
-DEFAULT_CONFIG = {"daily_limit": 5, "schedule_time": "09:00", "data_dir": DEFAULT_DATA_DIR, "default_sender_name": "The Power People", "random_delay_min": 5, "random_delay_max": 15, "retry_count": 1, "backup_enabled": True, "log_retention_days": 90, "theme": "Light"}
+DEFAULT_CONFIG = {"daily_limit": 5, "schedule_time": "09:00", "data_dir": DEFAULT_DATA_DIR, "default_sender_name": "The Power People", "random_delay_min": 5, "random_delay_max": 15, "retry_count": 1, "backup_enabled": True, "log_retention_days": 90, "theme": "Light", "tracking_sync_enabled": False, "tracking_sync_interval_hours": 5, "tracking_last_sync_time": ""}
+TRACKING_BASE_URL = "https://emailtrackingserver.onrender.com"
 
 
 def exe_dir():
@@ -95,6 +97,10 @@ def daily_log(email="", subject="", status="", error="", sender_email="", smtp_r
 
 def account_service():
     return AccountService(app_paths()["accounts"])
+
+
+def tracking_sync_service():
+    return TrackingSynchronizationService(TRACKING_BASE_URL, app_paths()["list"], app_paths()["logs"])
 
 
 def migrate_legacy_account():
@@ -1006,14 +1012,112 @@ def write_simple_pdf(path,lines):
     xref=len(data);data+=f"xref\n0 {len(objects)+1}\n0000000000 65535 f \n".encode();data+=b"".join(f"{o:010d} 00000 n \n".encode() for o in offsets[1:]);data+=f"trailer<< /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode();Path(path).write_bytes(data)
 
 
+class TrackingSynchronizationWindow:
+    def __init__(self, parent, on_config_saved=None):
+        self.root = tk.Toplevel(parent)
+        self.root.title("Tracking Synchronization")
+        self.root.geometry("570x410")
+        self.root.resizable(False, False)
+        self.on_config_saved = on_config_saved
+        self.cfg = load_config()
+        frame = ttk.Frame(self.root, padding=22)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Tracking Synchronization", font=("Segoe UI", 17, "bold")).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 20))
+        self.enabled = tk.BooleanVar(value=self.cfg.get("tracking_sync_enabled", False))
+        ttk.Checkbutton(frame, text="Enable Automatic Synchronization", variable=self.enabled).grid(row=1, column=0, columnspan=3, sticky="w", pady=8)
+        ttk.Label(frame, text="Every").grid(row=2, column=0, sticky="w", pady=10)
+        self.interval = tk.StringVar(value=str(self.cfg.get("tracking_sync_interval_hours", 5)))
+        ttk.Spinbox(frame, from_=1, to=24, textvariable=self.interval, width=8).grid(row=2, column=1, sticky="w")
+        ttk.Label(frame, text="Hours").grid(row=2, column=2, sticky="w")
+        self.last_sync = tk.StringVar(value=self.cfg.get("tracking_last_sync_time") or "Never")
+        ttk.Label(frame, text="Last Synchronization:").grid(row=3, column=0, sticky="nw", pady=10)
+        ttk.Label(frame, textvariable=self.last_sync, wraplength=330).grid(row=3, column=1, columnspan=2, sticky="w", pady=10)
+        self.status = tk.StringVar(value="Ready")
+        ttk.Label(frame, textvariable=self.status, wraplength=500).grid(row=4, column=0, columnspan=3, sticky="w", pady=12)
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=5, column=0, columnspan=3, sticky="w", pady=(18, 0))
+        self.sync_button = ttk.Button(buttons, text="Sync Now", command=self.sync_now)
+        self.sync_button.pack(side="left", padx=(0, 8))
+        ttk.Button(buttons, text="Save Configuration", command=self.save_configuration).pack(side="left", padx=8)
+        ttk.Button(buttons, text="Close", command=self.root.destroy).pack(side="left", padx=8)
+
+    def save_configuration(self, show_confirmation=True):
+        try:
+            interval = int(self.interval.get())
+            if interval < 1 or interval > 24:
+                raise ValueError("Synchronization interval must be between 1 and 24 hours.")
+            self.cfg["tracking_sync_enabled"] = self.enabled.get()
+            self.cfg["tracking_sync_interval_hours"] = interval
+            save_config(self.cfg)
+            if self.on_config_saved:
+                self.on_config_saved()
+            if show_confirmation:
+                messagebox.showinfo(APP_NAME, "Synchronization configuration saved.", parent=self.root)
+        except ValueError as exc:
+            messagebox.showerror(APP_NAME, str(exc), parent=self.root)
+
+    def sync_now(self):
+        self.save_configuration(show_confirmation=False)
+        self.sync_button.configure(state="disabled")
+        self.status.set("Synchronization started…")
+
+        def worker():
+            try:
+                result = tracking_sync_service().sync(self.cfg.get("tracking_last_sync_time", ""))
+                self.cfg["tracking_last_sync_time"] = result["last_sync_time"]
+                save_config(self.cfg)
+                self.root.after(0, self.sync_complete, result)
+            except Exception as exc:
+                self.root.after(0, self.sync_failed, str(exc))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def sync_complete(self, result):
+        self.sync_button.configure(state="normal")
+        self.last_sync.set(result["last_sync_time"])
+        text = ("Synchronization Complete\n\n"
+                f"Records Downloaded: {result['records_downloaded']}\n"
+                f"Rows Updated: {result['rows_updated']}\n"
+                f"Execution Time: {result['execution_time']:.2f} seconds\n"
+                f"Last Synchronization Time: {result['last_sync_time']}")
+        self.status.set(text)
+        messagebox.showinfo(APP_NAME, text, parent=self.root)
+
+    def sync_failed(self, error):
+        self.sync_button.configure(state="normal")
+        self.status.set(f"Synchronization failed: {error}")
+        messagebox.showerror(APP_NAME, f"Tracking synchronization failed:\n\n{error}", parent=self.root)
+
+
 class EmailAutomationApp:
     def __init__(self):
         self.root=tk.Tk();self.root.title("Email Automation");self.root.geometry("1120x680");self.root.minsize(900,580)
         sidebar=tk.Frame(self.root,bg="#16324f",width=210);sidebar.pack(side="left",fill="y");sidebar.pack_propagate(False)
         tk.Label(sidebar,text="Email Automation",bg="#16324f",fg="white",font=("Segoe UI",16,"bold"),pady=24).pack(fill="x")
-        actions=(("Dashboard",self.refresh),("Send Mail Now",lambda:SenderWindow(self.root)),("Daily Scheduling",lambda:MultiScheduleWindow(self.root)),("Mail Account Setup",lambda:AccountWindow(self.root)),("Reports",lambda:ReportsWindow(self.root)),("Settings",lambda:SettingsWindow(self.root)),("Logs",lambda:LogWindow(self.root)),("Exit",self.root.destroy))
+        actions=(("Dashboard",self.refresh),("Send Mail Now",lambda:SenderWindow(self.root)),("Daily Scheduling",lambda:MultiScheduleWindow(self.root)),("Mail Account Setup",lambda:AccountWindow(self.root)),("Tracking Synchronization",lambda:TrackingSynchronizationWindow(self.root,self.schedule_tracking_check)),("Reports",lambda:ReportsWindow(self.root)),("Settings",lambda:SettingsWindow(self.root)),("Logs",lambda:LogWindow(self.root)),("Exit",self.root.destroy))
         for text,cmd in actions:tk.Button(sidebar,text=text,command=cmd,bg="#16324f",fg="white",activebackground="#285b87",activeforeground="white",relief="flat",anchor="w",padx=22,pady=11,font=("Segoe UI",10)).pack(fill="x")
-        self.main=ttk.Frame(self.root,padding=22);self.main.pack(side="left",fill="both",expand=True);self.refresh()
+        self.main=ttk.Frame(self.root,padding=22);self.main.pack(side="left",fill="both",expand=True);self.sync_running=False;self.tracking_check_job=None;self.refresh();self.tracking_check_job=self.root.after(1500,self.check_tracking_synchronization)
+
+    def schedule_tracking_check(self):
+        if self.tracking_check_job:
+            self.root.after_cancel(self.tracking_check_job)
+        self.tracking_check_job = self.root.after(100, self.check_tracking_synchronization)
+
+    def check_tracking_synchronization(self):
+        cfg = load_config()
+        due = synchronization_is_due(cfg.get("tracking_sync_enabled", False), cfg.get("tracking_sync_interval_hours", 5), cfg.get("tracking_last_sync_time", ""))
+        if due and not self.sync_running:
+            self.sync_running = True
+            last_sync = cfg.get("tracking_last_sync_time", "")
+            def worker():
+                try:
+                    result = tracking_sync_service().sync(last_sync)
+                    updated = load_config(); updated["tracking_last_sync_time"] = result["last_sync_time"]; save_config(updated)
+                except Exception:
+                    pass
+                finally:
+                    self.sync_running = False
+            threading.Thread(target=worker, daemon=True).start()
+        self.tracking_check_job = self.root.after(60000, self.check_tracking_synchronization)
     def refresh(self):
         for child in self.main.winfo_children():child.destroy()
         ttk.Label(self.main,text="Dashboard",font=("Segoe UI",20,"bold")).pack(anchor="w")
