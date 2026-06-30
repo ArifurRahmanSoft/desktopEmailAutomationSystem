@@ -33,6 +33,7 @@ class TrackingSynchronizationTests(unittest.TestCase):
             self.assertEqual(urls, ["https://server.test/api/tracking/sync"])
             self.assertEqual(result["records_downloaded"], 2)
             self.assertEqual(result["rows_updated"], 1)
+            self.assertEqual(result["last_sync_time"], "")
             wb = load_workbook(path, data_only=True); ws = wb.active
             headers = {str(c.value): i for i, c in enumerate(ws[1], 1)}
             self.assertEqual(ws.cell(2, headers["OpenCount"]).value, 3)
@@ -48,6 +49,55 @@ class TrackingSynchronizationTests(unittest.TestCase):
             service = TrackingSynchronizationService("https://server.test", path, Path(temp) / "logs", lambda url: urls.append(url) or [])
             service.sync("2026-06-30T10:20:30+00:00")
             self.assertIn("updated_after=2026-06-30T10%3A20%3A30%2B00%3A00", urls[0])
+
+    def test_cursor_uses_maximum_server_updated_at_and_logs_debug_values(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.workbook(temp)
+            payload = [
+                {"trackingId": "track-1", "openCount": 1, "updated_at": "2026-06-30T09:00:00Z"},
+                {"trackingId": "track-2", "clickCount": 2, "updatedAt": "2026-06-30T12:30:00+00:00"},
+                {"trackingId": "track-2", "openCount": 3},
+            ]
+            logs = Path(temp) / "logs"
+            service = TrackingSynchronizationService("https://server.test", path, logs, lambda _: payload)
+            result = service.sync("2026-06-30T08:00:00Z")
+            self.assertEqual(result["last_sync_time"], "2026-06-30T12:30:00+00:00")
+            content = next(logs.glob("tracking-sync-*.log")).read_text(encoding="utf-8")
+            self.assertIn('"previous_last_sync": "2026-06-30T08:00:00Z"', content)
+            self.assertIn('"maximum_updated_at_received": "2026-06-30T12:30:00+00:00"', content)
+            self.assertIn('"new_last_sync": "2026-06-30T12:30:00+00:00"', content)
+            self.assertIn('"records_downloaded": 3', content)
+            self.assertIn('"rows_updated": 2', content)
+
+    def test_zero_records_keeps_previous_cursor(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.workbook(temp)
+            previous = "2026-06-30T08:00:00Z"
+            service = TrackingSynchronizationService("https://server.test", path, Path(temp) / "logs", lambda _: [])
+            result = service.sync(previous)
+            self.assertEqual(result["last_sync_time"], previous)
+
+    def test_full_debug_sync_ignores_cursor_and_logs_reconciliation_counts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.workbook(temp); urls = []
+            payload = [
+                {"trackingId": "track-1", "openCount": 4, "updated_at": "2026-06-30T12:00:00Z"},
+                {"trackingId": "not-in-excel", "clickCount": 1, "updated_at": "2026-06-30T13:00:00Z"},
+            ]
+            previous = "2026-06-29T08:00:00Z"; logs = Path(temp) / "logs"
+            service = TrackingSynchronizationService("https://server.test", path, logs, lambda url: urls.append(url) or payload)
+            result = service.sync(previous, full_synchronization_debug=True)
+            self.assertEqual(urls, ["https://server.test/api/tracking/sync"])
+            self.assertEqual(result["last_sync_time"], previous)
+            self.assertEqual(result["tracking_ids_matched"], 1)
+            self.assertEqual(result["rows_updated"], 1)
+            self.assertEqual(result["tracking_ids_not_found"], 1)
+            content = next(logs.glob("tracking-sync-*.log")).read_text(encoding="utf-8")
+            self.assertIn('"total_records_downloaded": 2', content)
+            self.assertIn('"total_tracking_ids_matched": 1', content)
+            self.assertIn('"total_excel_rows_updated": 1', content)
+            self.assertIn('"total_tracking_ids_not_found": 1', content)
+            self.assertIn('"full_synchronization_debug": true', content)
 
     def test_api_failure_does_not_modify_excel(self):
         with tempfile.TemporaryDirectory() as temp:

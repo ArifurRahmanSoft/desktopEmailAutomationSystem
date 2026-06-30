@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from urllib.parse import quote
-from datetime import datetime
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
 import tkinter as tk
@@ -22,6 +22,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from dotenv import dotenv_values
 from openpyxl import Workbook, load_workbook
 from account_service import AccountService
+from build_info import BUILD_TIMESTAMP_UTC
 from placeholder_service import PlaceholderService
 from tracking_sync_service import TrackingSynchronizationService, synchronization_is_due
 
@@ -29,7 +30,7 @@ from tracking_sync_service import TrackingSynchronizationService, synchronizatio
 APP_NAME = "Email Automation"
 TASK_NAME = "The Power People Daily Email Automation"
 DEFAULT_DATA_DIR = r"F:\CODEX\Email_automation"
-DEFAULT_CONFIG = {"daily_limit": 5, "schedule_time": "09:00", "data_dir": DEFAULT_DATA_DIR, "default_sender_name": "The Power People", "random_delay_min": 5, "random_delay_max": 15, "retry_count": 1, "backup_enabled": True, "log_retention_days": 90, "theme": "Light", "tracking_sync_enabled": False, "tracking_sync_interval_hours": 5, "tracking_last_sync_time": ""}
+DEFAULT_CONFIG = {"daily_limit": 5, "schedule_time": "09:00", "data_dir": DEFAULT_DATA_DIR, "default_sender_name": "The Power People", "random_delay_min": 5, "random_delay_max": 15, "retry_count": 1, "backup_enabled": True, "log_retention_days": 90, "theme": "Light", "tracking_sync_enabled": False, "tracking_sync_interval_hours": 5, "tracking_last_sync_time": "", "FullSynchronizationDebug": True}
 TRACKING_BASE_URL = "https://emailtrackingserver.onrender.com"
 
 
@@ -93,6 +94,13 @@ def daily_log(email="", subject="", status="", error="", sender_email="", smtp_r
         if new_file:
             writer.writerow(["Date", "Time", "TrackingId", "Sender Email", "Recipient Email", "Subject", "Status", "SMTP Response", "Error Message", "Execution Time Seconds"])
         writer.writerow([f"{now:%Y-%m-%d}", f"{now:%H:%M:%S}", tracking_id, sender_email, email, subject, status, smtp_response, error, execution_time])
+
+
+def startup_log():
+    ensure_dirs()
+    path = app_paths()["logs"] / "startup.log"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{datetime.now(timezone.utc).isoformat()} | Build: {BUILD_TIMESTAMP_UTC} UTC\n")
 
 
 def account_service():
@@ -1013,12 +1021,13 @@ def write_simple_pdf(path,lines):
 
 
 class TrackingSynchronizationWindow:
-    def __init__(self, parent, on_config_saved=None):
+    def __init__(self, parent, on_config_saved=None, on_sync_complete=None):
         self.root = tk.Toplevel(parent)
         self.root.title("Tracking Synchronization")
         self.root.geometry("570x410")
         self.root.resizable(False, False)
         self.on_config_saved = on_config_saved
+        self.on_sync_complete_callback = on_sync_complete
         self.cfg = load_config()
         frame = ttk.Frame(self.root, padding=22)
         frame.pack(fill="both", expand=True)
@@ -1063,8 +1072,10 @@ class TrackingSynchronizationWindow:
 
         def worker():
             try:
-                result = tracking_sync_service().sync(self.cfg.get("tracking_last_sync_time", ""))
-                self.cfg["tracking_last_sync_time"] = result["last_sync_time"]
+                debug_mode = self.cfg.get("FullSynchronizationDebug", True)
+                result = tracking_sync_service().sync(self.cfg.get("tracking_last_sync_time", ""), debug_mode)
+                if not debug_mode:
+                    self.cfg["tracking_last_sync_time"] = result["last_sync_time"]
                 save_config(self.cfg)
                 self.root.after(0, self.sync_complete, result)
             except Exception as exc:
@@ -1080,6 +1091,8 @@ class TrackingSynchronizationWindow:
                 f"Execution Time: {result['execution_time']:.2f} seconds\n"
                 f"Last Synchronization Time: {result['last_sync_time']}")
         self.status.set(text)
+        if self.on_sync_complete_callback:
+            self.on_sync_complete_callback()
         messagebox.showinfo(APP_NAME, text, parent=self.root)
 
     def sync_failed(self, error):
@@ -1093,9 +1106,13 @@ class EmailAutomationApp:
         self.root=tk.Tk();self.root.title("Email Automation");self.root.geometry("1120x680");self.root.minsize(900,580)
         sidebar=tk.Frame(self.root,bg="#16324f",width=210);sidebar.pack(side="left",fill="y");sidebar.pack_propagate(False)
         tk.Label(sidebar,text="Email Automation",bg="#16324f",fg="white",font=("Segoe UI",16,"bold"),pady=24).pack(fill="x")
-        actions=(("Dashboard",self.refresh),("Send Mail Now",lambda:SenderWindow(self.root)),("Daily Scheduling",lambda:MultiScheduleWindow(self.root)),("Mail Account Setup",lambda:AccountWindow(self.root)),("Tracking Synchronization",lambda:TrackingSynchronizationWindow(self.root,self.schedule_tracking_check)),("Reports",lambda:ReportsWindow(self.root)),("Settings",lambda:SettingsWindow(self.root)),("Logs",lambda:LogWindow(self.root)),("Exit",self.root.destroy))
+        actions=(("Dashboard",self.refresh),("Send Mail Now",lambda:SenderWindow(self.root)),("Daily Scheduling",lambda:MultiScheduleWindow(self.root)),("Mail Account Setup",lambda:AccountWindow(self.root)),("Tracking Synchronization",lambda:TrackingSynchronizationWindow(self.root,self.schedule_tracking_check,self.record_tracking_sync_run)),("Reports",lambda:ReportsWindow(self.root)),("Settings",lambda:SettingsWindow(self.root)),("Logs",lambda:LogWindow(self.root)),("Exit",self.root.destroy))
         for text,cmd in actions:tk.Button(sidebar,text=text,command=cmd,bg="#16324f",fg="white",activebackground="#285b87",activeforeground="white",relief="flat",anchor="w",padx=22,pady=11,font=("Segoe UI",10)).pack(fill="x")
-        self.main=ttk.Frame(self.root,padding=22);self.main.pack(side="left",fill="both",expand=True);self.sync_running=False;self.tracking_check_job=None;self.refresh();self.tracking_check_job=self.root.after(1500,self.check_tracking_synchronization)
+        tk.Label(sidebar,text=f"Build:\n{BUILD_TIMESTAMP_UTC} UTC",bg="#16324f",fg="#b9cfe3",font=("Segoe UI",8),justify="left",padx=22,pady=12).pack(side="bottom",fill="x",anchor="w")
+        self.main=ttk.Frame(self.root,padding=22);self.main.pack(side="left",fill="both",expand=True);self.sync_running=False;self.tracking_check_job=None;self.tracking_debug_last_run="";self.refresh();self.tracking_check_job=self.root.after(1500,self.check_tracking_synchronization)
+
+    def record_tracking_sync_run(self):
+        self.tracking_debug_last_run = datetime.now(timezone.utc).isoformat()
 
     def schedule_tracking_check(self):
         if self.tracking_check_job:
@@ -1104,14 +1121,20 @@ class EmailAutomationApp:
 
     def check_tracking_synchronization(self):
         cfg = load_config()
-        due = synchronization_is_due(cfg.get("tracking_sync_enabled", False), cfg.get("tracking_sync_interval_hours", 5), cfg.get("tracking_last_sync_time", ""))
+        debug_mode = cfg.get("FullSynchronizationDebug", True)
+        scheduling_cursor = self.tracking_debug_last_run if debug_mode else cfg.get("tracking_last_sync_time", "")
+        due = synchronization_is_due(cfg.get("tracking_sync_enabled", False), cfg.get("tracking_sync_interval_hours", 5), scheduling_cursor)
         if due and not self.sync_running:
             self.sync_running = True
             last_sync = cfg.get("tracking_last_sync_time", "")
             def worker():
                 try:
-                    result = tracking_sync_service().sync(last_sync)
-                    updated = load_config(); updated["tracking_last_sync_time"] = result["last_sync_time"]; save_config(updated)
+                    current = load_config(); debug_mode = current.get("FullSynchronizationDebug", True)
+                    result = tracking_sync_service().sync(last_sync, debug_mode)
+                    if not debug_mode:
+                        updated = load_config(); updated["tracking_last_sync_time"] = result["last_sync_time"]; save_config(updated)
+                    else:
+                        self.record_tracking_sync_run()
                 except Exception:
                     pass
                 finally:
@@ -1180,7 +1203,7 @@ def main():
         except Exception as exc:daily_log(status="Scheduled Run Error",error=str(exc))
         return
     if name == "email automation" or name == "emailautomation":
-        migrate_legacy_account();EmailAutomationApp().run();return
+        migrate_legacy_account();startup_log();EmailAutomationApp().run();return
     if "setup" in name: setup_app()
     elif "configure" in name: ScheduleWindow().run()
     elif "verify" in name: verify_app()
