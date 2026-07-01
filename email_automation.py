@@ -22,6 +22,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from dotenv import dotenv_values
 from openpyxl import Workbook, load_workbook
 from account_service import AccountService
+from bounce_tracking_service import BounceTrackingService
 from build_info import BUILD_TIMESTAMP_UTC
 from placeholder_service import PlaceholderService
 from tracking_sync_service import TrackingSynchronizationService, synchronization_is_due
@@ -30,7 +31,7 @@ from tracking_sync_service import TrackingSynchronizationService, synchronizatio
 APP_NAME = "Email Automation"
 TASK_NAME = "The Power People Daily Email Automation"
 DEFAULT_DATA_DIR = r"F:\CODEX\Email_automation"
-DEFAULT_CONFIG = {"daily_limit": 5, "schedule_time": "09:00", "data_dir": DEFAULT_DATA_DIR, "default_sender_name": "The Power People", "random_delay_min": 5, "random_delay_max": 15, "retry_count": 1, "backup_enabled": True, "log_retention_days": 90, "theme": "Light", "tracking_sync_enabled": False, "tracking_sync_interval_hours": 5, "tracking_last_sync_time": "", "FullSynchronizationDebug": True}
+DEFAULT_CONFIG = {"daily_limit": 5, "schedule_time": "09:00", "data_dir": DEFAULT_DATA_DIR, "default_sender_name": "The Power People", "random_delay_min": 5, "random_delay_max": 15, "retry_count": 1, "backup_enabled": True, "log_retention_days": 90, "theme": "Light", "tracking_sync_enabled": False, "tracking_sync_interval_hours": 5, "tracking_last_sync_time": "", "FullSynchronizationDebug": True, "bounce_check_enabled": False, "bounce_check_interval_minutes": 30}
 TRACKING_BASE_URL = "https://emailtrackingserver.onrender.com"
 
 
@@ -109,6 +110,10 @@ def account_service():
 
 def tracking_sync_service():
     return TrackingSynchronizationService(TRACKING_BASE_URL, app_paths()["list"], app_paths()["logs"])
+
+
+def bounce_tracking_service():
+    return BounceTrackingService(app_paths()["list"], app_paths()["logs"])
 
 
 def migrate_legacy_account():
@@ -336,8 +341,8 @@ def send_pending(limit, wait_between=True, progress=None, excel_path=None):
             sender_name = PlaceholderService.render(sender_name, context).strip() or default_sender_name
             sender_column = h.get("sender_email") or h.get("sender_mail")
             sender_email = str(ws.cell(row, sender_column).value or "").strip().lower() if sender_column else ""
-            smtp_values = accounts.smtp_credentials(sender_email)
-            if not smtp_values:
+            smtp_configuration = accounts.smtp_configuration(sender_email)
+            if not smtp_configuration:
                 raise ValueError("Sender Account Not Configured")
             if not validate_recipient_email(email):
                 raise ValueError("Invalid email address")
@@ -359,11 +364,7 @@ def send_pending(limit, wait_between=True, progress=None, excel_path=None):
                 if smtp is not None:
                     try: smtp.quit()
                     except Exception: pass
-                smtp = smtplib.SMTP("smtp.gmail.com", 587, timeout=45)
-                smtp.ehlo()
-                smtp.starttls()
-                smtp.ehlo()
-                smtp.login(*smtp_values)
+                smtp = accounts.connect_smtp(smtp_configuration, timeout=45)
                 active_sender = sender_email
             attempts = max(1, int(cfg.get("retry_count", 1)) + 1)
             last_error = None
@@ -717,40 +718,103 @@ class ScheduleWindow:
     def run(self): self.root.mainloop()
 
 
+class MailAccountEditor:
+    def __init__(self, parent, account=None):
+        self.account = account or {}
+        self.result = None
+        self.window = tk.Toplevel(parent); self.window.title("Edit Mail Account" if account else "Add Mail Account"); self.window.geometry("620x650"); self.window.resizable(False, False); self.window.transient(parent); self.window.grab_set()
+        frame = ttk.Frame(self.window, padding=20); frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Mail Provider Account", font=("Segoe UI", 16, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 16))
+        self.provider = tk.StringVar(value=self.account.get("provider", "Gmail"))
+        self.display_name = tk.StringVar(value=self.account.get("display_name", self.account.get("name", "")))
+        self.email = tk.StringVar(value=self.account.get("email", ""))
+        self.host = tk.StringVar(value=self.account.get("smtp_host", "smtp.gmail.com"))
+        self.port = tk.StringVar(value=str(self.account.get("smtp_port", 587)))
+        self.encryption = tk.StringVar(value=self.account.get("encryption", "STARTTLS"))
+        self.imap_host = tk.StringVar(value=self.account.get("imap_host", "imap.gmail.com"))
+        self.imap_port = tk.StringVar(value=str(self.account.get("imap_port", 993)))
+        self.imap_encryption = tk.StringVar(value=self.account.get("imap_encryption", "SSL/TLS"))
+        self.password = tk.StringVar()
+        self.enabled = tk.BooleanVar(value=self.account.get("enabled", True))
+        labels = (("Mail Provider:", 1), ("Display Name:", 2), ("Email Address:", 3), ("SMTP Host:", 4), ("SMTP Port:", 5), ("SMTP Encryption:", 6), ("IMAP Host:", 7), ("IMAP Port:", 8), ("IMAP Encryption:", 9), ("Password / App Password:", 10))
+        for text, row in labels: ttk.Label(frame, text=text).grid(row=row, column=0, sticky="w", pady=7)
+        self.provider_box = ttk.Combobox(frame, textvariable=self.provider, values=AccountService.PROVIDERS, state="readonly", width=32); self.provider_box.grid(row=1, column=1, sticky="w"); self.provider_box.bind("<<ComboboxSelected>>", self.provider_changed)
+        ttk.Entry(frame, textvariable=self.display_name, width=38).grid(row=2, column=1, sticky="w")
+        ttk.Entry(frame, textvariable=self.email, width=38).grid(row=3, column=1, sticky="w")
+        self.host_entry = ttk.Entry(frame, textvariable=self.host, width=38); self.host_entry.grid(row=4, column=1, sticky="w")
+        self.port_entry = ttk.Entry(frame, textvariable=self.port, width=15); self.port_entry.grid(row=5, column=1, sticky="w")
+        self.encryption_box = ttk.Combobox(frame, textvariable=self.encryption, values=AccountService.ENCRYPTION_TYPES, state="readonly", width=32); self.encryption_box.grid(row=6, column=1, sticky="w")
+        self.imap_host_entry = ttk.Entry(frame, textvariable=self.imap_host, width=38); self.imap_host_entry.grid(row=7, column=1, sticky="w")
+        self.imap_port_entry = ttk.Entry(frame, textvariable=self.imap_port, width=15); self.imap_port_entry.grid(row=8, column=1, sticky="w")
+        self.imap_encryption_box = ttk.Combobox(frame, textvariable=self.imap_encryption, values=AccountService.ENCRYPTION_TYPES, state="readonly", width=32); self.imap_encryption_box.grid(row=9, column=1, sticky="w")
+        ttk.Entry(frame, textvariable=self.password, show="*", width=38).grid(row=10, column=1, sticky="w")
+        password_note = "Leave empty while editing to keep the stored password." if account else "Gmail requires a Google App Password."
+        ttk.Label(frame, text=password_note, foreground="#555").grid(row=11, column=1, sticky="w", pady=(0, 8))
+        ttk.Checkbutton(frame, text="Enabled", variable=self.enabled).grid(row=12, column=1, sticky="w", pady=8)
+        buttons = ttk.Frame(frame); buttons.grid(row=13, column=0, columnspan=2, sticky="e", pady=(18, 0))
+        ttk.Button(buttons, text="Save", command=self.save).pack(side="left", padx=5); ttk.Button(buttons, text="Cancel", command=self.window.destroy).pack(side="left", padx=5)
+        self.apply_provider_state(reset_defaults=False)
+        self.window.wait_window()
+    def provider_changed(self, _event=None): self.apply_provider_state(reset_defaults=True)
+    def apply_provider_state(self, reset_defaults=False):
+        gmail = self.provider.get() == "Gmail"
+        if gmail:
+            self.host.set("smtp.gmail.com"); self.port.set("587"); self.encryption.set("STARTTLS"); self.imap_host.set("imap.gmail.com"); self.imap_port.set("993"); self.imap_encryption.set("SSL/TLS")
+        elif reset_defaults:
+            self.host.set(""); self.port.set("587"); self.encryption.set("STARTTLS"); self.imap_host.set(""); self.imap_port.set("993"); self.imap_encryption.set("SSL/TLS")
+        self.host_entry.configure(state="disabled" if gmail else "normal")
+        self.port_entry.configure(state="disabled" if gmail else "normal")
+        self.encryption_box.configure(state="disabled" if gmail else "readonly")
+        self.imap_host_entry.configure(state="disabled" if gmail else "normal")
+        self.imap_port_entry.configure(state="disabled" if gmail else "normal")
+        self.imap_encryption_box.configure(state="disabled" if gmail else "readonly")
+    def save(self):
+        try:
+            provider = self.provider.get()
+            host = "smtp.gmail.com" if provider == "Gmail" else self.host.get().strip()
+            port = 587 if provider == "Gmail" else self.port.get().strip()
+            encryption = "STARTTLS" if provider == "Gmail" else self.encryption.get()
+            imap_host = "imap.gmail.com" if provider == "Gmail" else self.imap_host.get().strip()
+            imap_port = 993 if provider == "Gmail" else self.imap_port.get().strip()
+            imap_encryption = "SSL/TLS" if provider == "Gmail" else self.imap_encryption.get()
+            if not host: raise ValueError("SMTP Host cannot be empty.")
+            if not str(port).isdigit(): raise ValueError("SMTP Port must be numeric.")
+            if not imap_host: raise ValueError("IMAP Host cannot be empty.")
+            if not str(imap_port).isdigit(): raise ValueError("IMAP Port must be numeric.")
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", self.email.get().strip()): raise ValueError("A valid email address is required.")
+            self.result = {"name": self.display_name.get().strip(), "email": self.email.get().strip(), "password": self.password.get(), "enabled": self.enabled.get(), "provider": provider, "smtp_host": host, "smtp_port": port, "encryption": encryption, "imap_host": imap_host, "imap_port": imap_port, "imap_encryption": imap_encryption}
+            self.window.destroy()
+        except ValueError as exc: messagebox.showerror(APP_NAME, str(exc), parent=self.window)
+
+
 class AccountWindow:
     def __init__(self, parent=None):
         self.root = tk.Toplevel(parent) if parent else tk.Tk()
         self.root.title("Mail Account Setup")
-        self.root.geometry("720x430")
+        self.root.geometry("1050x460")
         self.service = account_service()
         frame = ttk.Frame(self.root, padding=16); frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="Gmail Account Management", font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(0, 12))
-        self.tree = ttk.Treeview(frame, columns=("name", "email", "status"), show="headings")
-        for key, title, width in (("name", "Account Name", 200), ("email", "Gmail Address", 300), ("status", "Status", 100)):
+        ttk.Label(frame, text="Mail Account Management", font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(0, 12))
+        self.tree = ttk.Treeview(frame, columns=("provider", "name", "email", "host", "port", "encryption", "status"), show="headings")
+        for key, title, width in (("provider", "Provider", 110), ("name", "Display Name", 150), ("email", "Email Address", 210), ("host", "SMTP Host", 180), ("port", "Port", 60), ("encryption", "Encryption", 90), ("status", "Status", 80)):
             self.tree.heading(key, text=title); self.tree.column(key, width=width)
         self.tree.pack(fill="both", expand=True)
         bar = ttk.Frame(frame); bar.pack(fill="x", pady=(12, 0))
-        for text, command in (("Add", self.add), ("Edit", self.edit), ("Delete", self.delete), ("Enable", lambda: self.toggle(True)), ("Disable", lambda: self.toggle(False)), ("Test SMTP", self.test)):
+        for text, command in (("Add", self.add), ("Edit", self.edit), ("Delete", self.delete), ("Enable", lambda: self.toggle(True)), ("Disable", lambda: self.toggle(False)), ("Test SMTP Connection", self.test)):
             ttk.Button(bar, text=text, command=command).pack(side="left", padx=(0, 7))
         ttk.Button(bar, text="Close", command=self.root.destroy).pack(side="right")
         self.refresh()
     def selected(self):
         selected = self.tree.selection()
-        return self.tree.item(selected[0], "values") if selected else None
+        return self.service.find(self.tree.item(selected[0], "values")[2]) if selected else None
     def refresh(self):
         for item in self.tree.get_children(): self.tree.delete(item)
         for account in self.service.list_accounts():
-            self.tree.insert("", "end", values=(account["name"], account["email"], "Enabled" if account.get("enabled", True) else "Disabled"))
+            self.tree.insert("", "end", values=(account["provider"], account["display_name"], account["email"], account["smtp_host"], account["smtp_port"], account["encryption"], "Enabled" if account.get("enabled", True) else "Disabled"))
     def account_form(self, existing=None):
-        name = simpledialog.askstring(APP_NAME, "Account Name:", initialvalue=existing[0] if existing else "", parent=self.root)
-        if name is None: return
-        email = simpledialog.askstring(APP_NAME, "Gmail Address:", initialvalue=existing[1] if existing else "", parent=self.root)
-        if email is None: return
-        prompt = "New Google App Password (leave empty to keep existing):" if existing else "Google App Password:"
-        password = simpledialog.askstring(APP_NAME, prompt, show="*", parent=self.root)
-        if password is None: return
-        self.service.save_account(name, email, password, True, existing[1] if existing else None)
-        self.refresh()
+        values = MailAccountEditor(self.root, existing).result
+        if values:
+            self.service.save_account(original_email=existing["email"] if existing else None, **values); self.refresh()
     def add(self):
         try: self.account_form()
         except Exception as exc: messagebox.showerror(APP_NAME, str(exc), parent=self.root)
@@ -761,16 +825,16 @@ class AccountWindow:
         except Exception as exc: messagebox.showerror(APP_NAME, str(exc), parent=self.root)
     def delete(self):
         value = self.selected()
-        if value and messagebox.askyesno(APP_NAME, f"Delete {value[1]} permanently?", parent=self.root):
-            try: self.service.delete_account(value[1]); self.refresh()
+        if value and messagebox.askyesno(APP_NAME, f"Delete {value['email']} permanently?", parent=self.root):
+            try: self.service.delete_account(value["email"]); self.refresh()
             except Exception as exc: messagebox.showerror(APP_NAME, str(exc), parent=self.root)
     def toggle(self, enabled):
         value = self.selected()
-        if value: self.service.set_enabled(value[1], enabled); self.refresh()
+        if value: self.service.set_enabled(value["email"], enabled); self.refresh()
     def test(self):
         value = self.selected()
         if not value: return
-        try: self.service.test_smtp(value[1]); messagebox.showinfo(APP_NAME, "SMTP connection successful.", parent=self.root)
+        try: self.service.test_smtp(value["email"]); messagebox.showinfo(APP_NAME, "SMTP connection successful.", parent=self.root)
         except Exception as exc: messagebox.showerror(APP_NAME, str(exc), parent=self.root)
 
 
@@ -1101,15 +1165,94 @@ class TrackingSynchronizationWindow:
         messagebox.showerror(APP_NAME, f"Tracking synchronization failed:\n\n{error}", parent=self.root)
 
 
+class BounceTrackingWindow:
+    def __init__(self, parent, on_check_complete=None):
+        self.root = tk.Toplevel(parent); self.root.title("Bounce Tracking"); self.root.geometry("760x520")
+        self.on_check_complete = on_check_complete
+        self.cfg = load_config(); self.accounts = account_service(); self.service = bounce_tracking_service()
+        frame = ttk.Frame(self.root, padding=18); frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Bounce Mail Tracking", font=("Segoe UI", 17, "bold")).pack(anchor="w", pady=(0, 14))
+        self.tree = ttk.Treeview(frame, columns=("provider", "name", "email", "status"), show="headings", height=9)
+        for key, title, width in (("provider", "Provider", 110), ("name", "Display Name", 180), ("email", "Email Address", 300), ("status", "Status", 90)):
+            self.tree.heading(key, text=title); self.tree.column(key, width=width)
+        self.tree.pack(fill="both", expand=True)
+        for account in self.accounts.list_accounts(): self.tree.insert("", "end", values=(account["provider"], account["display_name"], account["email"], "Enabled" if account.get("enabled", True) else "Disabled"))
+        options = ttk.LabelFrame(frame, text="Automatic Bounce Check Scheduler", padding=12); options.pack(fill="x", pady=12)
+        self.enabled = tk.BooleanVar(value=self.cfg.get("bounce_check_enabled", False)); ttk.Checkbutton(options, text="Enable Automatic Bounce Check", variable=self.enabled).pack(side="left")
+        ttk.Label(options, text="Every").pack(side="left", padx=(30, 6)); self.interval = tk.StringVar(value=str(self.cfg.get("bounce_check_interval_minutes", 30))); ttk.Spinbox(options, from_=1, to=1440, textvariable=self.interval, width=8).pack(side="left"); ttk.Label(options, text="minutes").pack(side="left", padx=6)
+        self.status = tk.StringVar(value="Ready"); ttk.Label(frame, textvariable=self.status).pack(anchor="w", pady=6)
+        bar = ttk.Frame(frame); bar.pack(fill="x", pady=8)
+        self.check_button = ttk.Button(bar, text="Check Bounce Now", command=self.check_now); self.check_button.pack(side="left", padx=(0, 7))
+        ttk.Button(bar, text="Test IMAP Connection", command=self.test_imap).pack(side="left", padx=7)
+        ttk.Button(bar, text="Save Scheduler", command=self.save_scheduler).pack(side="left", padx=7)
+        ttk.Button(bar, text="Close", command=self.root.destroy).pack(side="right")
+    def selected_email(self):
+        selected = self.tree.selection(); return self.tree.item(selected[0], "values")[2] if selected else None
+    def save_scheduler(self, show_message=True):
+        try:
+            interval = int(self.interval.get())
+            if interval < 1: raise ValueError("Interval must be at least 1 minute.")
+            self.cfg["bounce_check_enabled"] = self.enabled.get(); self.cfg["bounce_check_interval_minutes"] = interval; save_config(self.cfg)
+            if show_message: messagebox.showinfo(APP_NAME, "Bounce scheduler saved.", parent=self.root)
+            return True
+        except ValueError as exc: messagebox.showerror(APP_NAME, str(exc), parent=self.root); return False
+    def configurations(self):
+        return [value for account in self.accounts.list_accounts() if account.get("enabled", True) for value in [self.accounts.imap_configuration(account["email"])] if value]
+    def check_now(self):
+        if not self.save_scheduler(show_message=False): return
+        self.check_button.configure(state="disabled"); self.status.set("Checking unread bounce emails…")
+        def worker():
+            detected = matched = 0; errors = []
+            for configuration in self.configurations():
+                try:
+                    result = self.service.check_account(configuration); detected += result["detected"]; matched += result["matched"]
+                except Exception as exc: errors.append(f"{configuration['email']}: {exc}")
+            self.root.after(0, self.check_complete, detected, matched, errors)
+        threading.Thread(target=worker, daemon=True).start()
+    def check_complete(self, detected, matched, errors):
+        self.check_button.configure(state="normal"); text = f"Bounce check complete. Detected: {detected}. Excel rows updated: {matched}."
+        if errors: text += "\n\n" + "\n".join(errors)
+        self.status.set(text)
+        if self.on_check_complete: self.on_check_complete()
+        (messagebox.showwarning if errors else messagebox.showinfo)(APP_NAME, text, parent=self.root)
+    def test_imap(self):
+        email_address = self.selected_email()
+        if not email_address: messagebox.showwarning(APP_NAME, "Select a mail account first.", parent=self.root); return
+        configuration = self.accounts.imap_configuration(email_address)
+        if not configuration: messagebox.showerror(APP_NAME, "Mail account is disabled or not configured.", parent=self.root); return
+        try: self.service.test_connection(configuration); messagebox.showinfo(APP_NAME, "IMAP connection successful.", parent=self.root)
+        except Exception as exc: messagebox.showerror(APP_NAME, f"IMAP connection failed:\n\n{exc}", parent=self.root)
+
+
 class EmailAutomationApp:
     def __init__(self):
         self.root=tk.Tk();self.root.title("Email Automation");self.root.geometry("1120x680");self.root.minsize(900,580)
         sidebar=tk.Frame(self.root,bg="#16324f",width=210);sidebar.pack(side="left",fill="y");sidebar.pack_propagate(False)
         tk.Label(sidebar,text="Email Automation",bg="#16324f",fg="white",font=("Segoe UI",16,"bold"),pady=24).pack(fill="x")
-        actions=(("Dashboard",self.refresh),("Send Mail Now",lambda:SenderWindow(self.root)),("Daily Scheduling",lambda:MultiScheduleWindow(self.root)),("Mail Account Setup",lambda:AccountWindow(self.root)),("Tracking Synchronization",lambda:TrackingSynchronizationWindow(self.root,self.schedule_tracking_check,self.record_tracking_sync_run)),("Reports",lambda:ReportsWindow(self.root)),("Settings",lambda:SettingsWindow(self.root)),("Logs",lambda:LogWindow(self.root)),("Exit",self.root.destroy))
+        actions=(("Dashboard",self.refresh),("Send Mail Now",lambda:SenderWindow(self.root)),("Daily Scheduling",lambda:MultiScheduleWindow(self.root)),("Mail Account Setup",lambda:AccountWindow(self.root)),("Tracking Synchronization",lambda:TrackingSynchronizationWindow(self.root,self.schedule_tracking_check,self.record_tracking_sync_run)),("Bounce Tracking",lambda:BounceTrackingWindow(self.root,self.record_bounce_check_run)),("Reports",lambda:ReportsWindow(self.root)),("Settings",lambda:SettingsWindow(self.root)),("Logs",lambda:LogWindow(self.root)),("Exit",self.root.destroy))
         for text,cmd in actions:tk.Button(sidebar,text=text,command=cmd,bg="#16324f",fg="white",activebackground="#285b87",activeforeground="white",relief="flat",anchor="w",padx=22,pady=11,font=("Segoe UI",10)).pack(fill="x")
         tk.Label(sidebar,text=f"Build:\n{BUILD_TIMESTAMP_UTC} UTC",bg="#16324f",fg="#b9cfe3",font=("Segoe UI",8),justify="left",padx=22,pady=12).pack(side="bottom",fill="x",anchor="w")
-        self.main=ttk.Frame(self.root,padding=22);self.main.pack(side="left",fill="both",expand=True);self.sync_running=False;self.tracking_check_job=None;self.tracking_debug_last_run="";self.refresh();self.tracking_check_job=self.root.after(1500,self.check_tracking_synchronization)
+        self.main=ttk.Frame(self.root,padding=22);self.main.pack(side="left",fill="both",expand=True);self.sync_running=False;self.tracking_check_job=None;self.tracking_debug_last_run="";self.bounce_check_running=False;self.bounce_last_run=0.0;self.refresh();self.tracking_check_job=self.root.after(1500,self.check_tracking_synchronization);self.root.after(2500,self.check_automatic_bounces)
+
+    def record_bounce_check_run(self): self.bounce_last_run = time.monotonic()
+
+    def check_automatic_bounces(self):
+        cfg = load_config(); interval = max(1, int(cfg.get("bounce_check_interval_minutes", 30))) * 60
+        due = not self.bounce_last_run or time.monotonic() - self.bounce_last_run >= interval
+        if cfg.get("bounce_check_enabled", False) and due and not self.bounce_check_running:
+            self.bounce_check_running = True
+            def worker():
+                try:
+                    accounts = account_service(); service = bounce_tracking_service()
+                    for account in accounts.list_accounts():
+                        configuration = accounts.imap_configuration(account["email"]) if account.get("enabled", True) else None
+                        if configuration:
+                            try: service.check_account(configuration)
+                            except Exception: pass
+                finally:
+                    self.record_bounce_check_run(); self.bounce_check_running = False
+            threading.Thread(target=worker, daemon=True).start()
+        self.root.after(60000, self.check_automatic_bounces)
 
     def record_tracking_sync_run(self):
         self.tracking_debug_last_run = datetime.now(timezone.utc).isoformat()

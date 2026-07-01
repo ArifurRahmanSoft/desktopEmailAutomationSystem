@@ -25,8 +25,10 @@ class FakeSMTP:
 
 
 class FakeAccounts:
-    def smtp_credentials(self, email):
-        return (email, "app-password") if email == "sender@example.com" else None
+    def smtp_configuration(self, email):
+        return {"email": email, "password": "app-password", "smtp_host": "smtp.test", "smtp_port": 587, "encryption": "STARTTLS"} if email == "sender@example.com" else None
+    def connect_smtp(self, configuration, timeout=45):
+        return FakeSMTP()
 
 
 with tempfile.TemporaryDirectory() as temp:

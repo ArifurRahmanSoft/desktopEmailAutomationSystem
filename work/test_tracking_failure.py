@@ -11,7 +11,8 @@ import email_automation as app
 
 
 class FakeAccounts:
-    def smtp_credentials(self, email): return (email, "password")
+    def smtp_configuration(self, email): return {"email": email, "password": "password", "smtp_host": "smtp.test", "smtp_port": 587, "encryption": "STARTTLS"}
+    def connect_smtp(self, configuration, timeout=45): raise AssertionError("SMTP must not be reached")
 
 
 class TrackingFailureTests(unittest.TestCase):

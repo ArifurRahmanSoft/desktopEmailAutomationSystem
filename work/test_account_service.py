@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -29,6 +30,49 @@ class AccountServiceTests(unittest.TestCase):
             service.delete_account("sales@gmail.com")
             self.assertEqual(service.list_accounts(), [])
             self.assertIsNone(credentials.get_password("sales@gmail.com"))
+
+    def test_legacy_account_receives_gmail_defaults_without_migration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "accounts.json"
+            path.write_text('[{"name":"Legacy","email":"legacy@gmail.com","enabled":true}]', encoding="utf-8")
+            account = AccountService(path, FakeCredentials()).list_accounts()[0]
+            self.assertEqual(account["provider"], "Gmail")
+            self.assertEqual(account["smtp_host"], "smtp.gmail.com")
+            self.assertEqual(account["smtp_port"], 587)
+            self.assertEqual(account["encryption"], "STARTTLS")
+            self.assertEqual((account["imap_host"], account["imap_port"], account["imap_encryption"]), ("imap.gmail.com", 993, "SSL/TLS"))
+            self.assertEqual(account["display_name"], "Legacy")
+
+    def test_custom_smtp_fields_are_stored_and_password_spaces_preserved(self):
+        with tempfile.TemporaryDirectory() as temp:
+            credentials = FakeCredentials(); service = AccountService(Path(temp) / "accounts.json", credentials)
+            service.save_account("Business", "mail@business.com", "pass word", True, provider="Custom SMTP", smtp_host="mail.business.com", smtp_port="465", encryption="SSL/TLS", imap_host="imap.business.com", imap_port="993", imap_encryption="SSL/TLS")
+            account = service.list_accounts()[0]
+            self.assertEqual((account["provider"], account["smtp_host"], account["smtp_port"], account["encryption"]), ("Custom SMTP", "mail.business.com", 465, "SSL/TLS"))
+            self.assertEqual((account["imap_host"], account["imap_port"]), ("imap.business.com", 993))
+            self.assertEqual(credentials.get_password("mail@business.com"), "pass word")
+
+    def test_validation_rejects_invalid_custom_settings(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service = AccountService(Path(temp) / "accounts.json", FakeCredentials())
+            with self.assertRaisesRegex(ValueError, "valid email"): service.save_account("X", "invalid", "p")
+            with self.assertRaisesRegex(ValueError, "Host"): service.save_account("X", "x@example.com", "p", provider="Custom SMTP", smtp_host="", smtp_port=587, encryption="STARTTLS")
+            with self.assertRaisesRegex(ValueError, "numeric"): service.save_account("X", "x@example.com", "p", provider="Custom SMTP", smtp_host="smtp.example.com", smtp_port="abc", encryption="STARTTLS")
+
+    def test_connection_modes(self):
+        class FakeSMTP:
+            def __init__(self, host, port, timeout): self.calls=[("init",host,port,timeout)]
+            def ehlo(self): self.calls.append(("ehlo",))
+            def starttls(self): self.calls.append(("starttls",))
+            def login(self, email, password): self.calls.append(("login",email,password))
+        base = {"email":"user@example.com","password":"secret","smtp_host":"smtp.example.com","smtp_port":587}
+        with patch("account_service.smtplib.SMTP", FakeSMTP), patch("account_service.smtplib.SMTP_SSL", FakeSMTP):
+            starttls = AccountService.connect_smtp({**base,"encryption":"STARTTLS"})
+            self.assertIn(("starttls",), starttls.calls)
+            plain = AccountService.connect_smtp({**base,"encryption":"None"})
+            self.assertNotIn(("starttls",), plain.calls)
+            ssl = AccountService.connect_smtp({**base,"encryption":"SSL/TLS"})
+            self.assertNotIn(("starttls",), ssl.calls)
 
 
 if __name__ == "__main__": unittest.main()
