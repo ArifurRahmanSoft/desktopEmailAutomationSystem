@@ -22,6 +22,7 @@ imports:
  &#8226;   <a href="#_weakrefset">_weakrefset</a>
  &#8226;   <a href="#abc">abc</a>
  &#8226;   <a href="#account_service">account_service</a>
+ &#8226;   <a href="#attachment_library_service">attachment_library_service</a>
  &#8226;   <a href="#bounce_tracking_service">bounce_tracking_service</a>
  &#8226;   <a href="#build_info">build_info</a>
  &#8226;   <a href="#codecs">codecs</a>
@@ -1531,6 +1532,29 @@ imported by:
 </div>
 
 <div class="node">
+  <a name="attachment_library_service"></a>
+  <a target="code" href="///C:/Users/DELL/Documents/Codex/2026-06-27/reate-a-file-named-hello-txt/attachment_library_service.py" type="text/plain"><tt>attachment_library_service</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#datetime">datetime</a>
+ &#8226;   <a href="#http.client">http.client</a>
+ &#8226;   <a href="#json">json</a>
+ &#8226;   <a href="#mimetypes">mimetypes</a>
+ &#8226;   <a href="#pathlib">pathlib</a>
+ &#8226;   <a href="#secrets">secrets</a>
+ &#8226;   <a href="#urllib.parse">urllib.parse</a>
+ &#8226;   <a href="#urllib.request">urllib.request</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#email_automation.py">email_automation.py</a>
+
+  </div>
+
+</div>
+
+<div class="node">
   <a name="base64"></a>
   <a target="code" href="///C:/Python314/Lib/base64.py" type="text/plain"><tt>base64</tt></a>
 <span class="moduletype">SourceModule</span>  <div class="import">
@@ -1548,6 +1572,7 @@ imported by:
  &#8226;   <a href="#email.base64mime">email.base64mime</a>
  &#8226;   <a href="#email.encoders">email.encoders</a>
  &#8226;   <a href="#encodings.base64_codec">encodings.base64_codec</a>
+ &#8226;   <a href="#secrets">secrets</a>
  &#8226;   <a href="#smtplib">smtplib</a>
  &#8226;   <a href="#ssl">ssl</a>
  &#8226;   <a href="#urllib.request">urllib.request</a>
@@ -2310,6 +2335,7 @@ imports:
   <div class="import">
 imported by:
     <a href="#_strptime">_strptime</a>
+ &#8226;   <a href="#attachment_library_service">attachment_library_service</a>
  &#8226;   <a href="#bounce_tracking_service">bounce_tracking_service</a>
  &#8226;   <a href="#calendar">calendar</a>
  &#8226;   <a href="#email.utils">email.utils</a>
@@ -5993,6 +6019,7 @@ imports:
   <div class="import">
 imported by:
     <a href="#imaplib">imaplib</a>
+ &#8226;   <a href="#secrets">secrets</a>
  &#8226;   <a href="#smtplib">smtplib</a>
 
   </div>
@@ -6070,7 +6097,8 @@ imports:
   </div>
   <div class="import">
 imported by:
-    <a href="#http.cookiejar">http.cookiejar</a>
+    <a href="#attachment_library_service">attachment_library_service</a>
+ &#8226;   <a href="#http.cookiejar">http.cookiejar</a>
  &#8226;   <a href="#urllib.request">urllib.request</a>
 
   </div>
@@ -6851,6 +6879,7 @@ imports:
   <div class="import">
 imported by:
     <a href="#account_service">account_service</a>
+ &#8226;   <a href="#attachment_library_service">attachment_library_service</a>
  &#8226;   <a href="#bounce_tracking_service">bounce_tracking_service</a>
  &#8226;   <a href="#email_automation.py">email_automation.py</a>
  &#8226;   <a href="#importlib.metadata">importlib.metadata</a>
@@ -7103,7 +7132,8 @@ imports:
   </div>
   <div class="import">
 imported by:
-    <a href="#openpyxl.packaging.manifest">openpyxl.packaging.manifest</a>
+    <a href="#attachment_library_service">attachment_library_service</a>
+ &#8226;   <a href="#openpyxl.packaging.manifest">openpyxl.packaging.manifest</a>
  &#8226;   <a href="#urllib.request">urllib.request</a>
 
   </div>
@@ -12137,6 +12167,7 @@ imports:
   <div class="import">
 imported by:
     <a href="#account_service">account_service</a>
+ &#8226;   <a href="#attachment_library_service">attachment_library_service</a>
  &#8226;   <a href="#bounce_tracking_service">bounce_tracking_service</a>
  &#8226;   <a href="#dotenv.main">dotenv.main</a>
  &#8226;   <a href="#email_automation.py">email_automation.py</a>
@@ -12422,6 +12453,7 @@ imported by:
  &#8226;   <a href="#email.utils">email.utils</a>
  &#8226;   <a href="#email_automation.py">email_automation.py</a>
  &#8226;   <a href="#imaplib">imaplib</a>
+ &#8226;   <a href="#secrets">secrets</a>
  &#8226;   <a href="#statistics">statistics</a>
  &#8226;   <a href="#tempfile">tempfile</a>
  &#8226;   <a href="#uuid">uuid</a>
@@ -12653,6 +12685,24 @@ imported by:
 <span class="moduletype">MissingModule</span>  <div class="import">
 imported by:
     <a href="#posix">posix</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="secrets"></a>
+  <a target="code" href="///C:/Python314/Lib/secrets.py" type="text/plain"><tt>secrets</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#base64">base64</a>
+ &#8226;   <a href="#hmac">hmac</a>
+ &#8226;   <a href="#random">random</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#attachment_library_service">attachment_library_service</a>
 
   </div>
 
@@ -13782,7 +13832,8 @@ imports:
   </div>
   <div class="import">
 imported by:
-    <a href="#email.utils">email.utils</a>
+    <a href="#attachment_library_service">attachment_library_service</a>
+ &#8226;   <a href="#email.utils">email.utils</a>
  &#8226;   <a href="#email_automation.py">email_automation.py</a>
  &#8226;   <a href="#http.client">http.client</a>
  &#8226;   <a href="#http.cookiejar">http.cookiejar</a>
@@ -13834,7 +13885,8 @@ imports:
   </div>
   <div class="import">
 imported by:
-    <a href="#http.cookiejar">http.cookiejar</a>
+    <a href="#attachment_library_service">attachment_library_service</a>
+ &#8226;   <a href="#http.cookiejar">http.cookiejar</a>
  &#8226;   <a href="#pathlib">pathlib</a>
  &#8226;   <a href="#tracking_sync_service">tracking_sync_service</a>
  &#8226;   <a href="#xml.sax.saxutils">xml.sax.saxutils</a>

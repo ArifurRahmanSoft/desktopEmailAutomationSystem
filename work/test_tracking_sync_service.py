@@ -50,6 +50,47 @@ class TrackingSynchronizationTests(unittest.TestCase):
             service.sync("2026-06-30T10:20:30+00:00")
             self.assertIn("updated_after=2026-06-30T10%3A20%3A30%2B00%3A00", urls[0])
 
+    def test_download_fields_are_appended_updated_and_logged(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.workbook(temp)
+            wb = load_workbook(path)
+            ws = wb.active
+            for name in ("OpenCount", "ClickCount", "FirstOpen", "LastOpen", "FirstClick", "LastClick"):
+                ws.cell(1, ws.max_column + 1, name)
+            ws.cell(2, 4, "keep-one")
+            wb.save(path)
+            wb.close()
+            payload = [
+                {
+                    "tracking_id": "track-1",
+                    "download_count": 4,
+                    "first_download": "2026-07-04T01:02:03Z",
+                    "last_download": "2026-07-04T04:05:06Z",
+                },
+                {"trackingId": "missing-row", "downloadCount": 2},
+                {"trackingId": "track-2", "openCount": 8},
+            ]
+            logs = Path(temp) / "logs"
+            service = TrackingSynchronizationService("https://server.test", path, logs, lambda _: payload)
+            result = service.sync("")
+            wb = load_workbook(path, data_only=True)
+            ws = wb.active
+            headers = {str(cell.value): index for index, cell in enumerate(ws[1], 1)}
+            self.assertEqual(headers["DownloadCount"], headers["LastClick"] + 1)
+            self.assertEqual(headers["FirstDownload"], headers["LastClick"] + 2)
+            self.assertEqual(headers["LastDownload"], headers["LastClick"] + 3)
+            self.assertEqual(ws.cell(2, headers["DownloadCount"]).value, 4)
+            self.assertEqual(ws.cell(2, headers["FirstDownload"]).value, "2026-07-04T01:02:03Z")
+            self.assertEqual(ws.cell(2, headers["LastDownload"]).value, "2026-07-04T04:05:06Z")
+            self.assertEqual(ws.cell(2, headers["Unrelated"]).value, "keep-one")
+            wb.close()
+            self.assertEqual(result["download_records_received"], 2)
+            self.assertEqual(result["download_rows_updated"], 1)
+            content = next(logs.glob("tracking-sync-*.log")).read_text(encoding="utf-8")
+            self.assertIn('"download_records_received": 2', content)
+            self.assertIn('"download_rows_updated": 1', content)
+            self.assertIn('"execution_time_seconds":', content)
+
     def test_cursor_uses_maximum_server_updated_at_and_logs_debug_values(self):
         with tempfile.TemporaryDirectory() as temp:
             path = self.workbook(temp)

@@ -8,7 +8,18 @@ from urllib.request import Request, urlopen
 from openpyxl import load_workbook
 
 
-TRACKING_COLUMNS = ("OpenCount", "ClickCount", "FirstOpen", "LastOpen", "FirstClick", "LastClick")
+TRACKING_COLUMNS = (
+    "OpenCount",
+    "ClickCount",
+    "FirstOpen",
+    "LastOpen",
+    "FirstClick",
+    "LastClick",
+    "DownloadCount",
+    "FirstDownload",
+    "LastDownload",
+)
+DOWNLOAD_COLUMNS = ("DownloadCount", "FirstDownload", "LastDownload")
 
 
 class TrackingSynchronizationService:
@@ -102,12 +113,17 @@ class TrackingSynchronizationService:
                 if value not in (None, ""):
                     row_by_tracking_id[str(value).strip().casefold()] = row
             updated_rows = set()
+            download_records_received = 0
+            download_rows_updated = set()
             matched_tracking_ids = set()
             tracking_ids_not_found = set()
             for record in records:
                 if not isinstance(record, dict):
                     continue
                 values = self._normalized(record)
+                has_download_data = any(name.casefold() in values for name in DOWNLOAD_COLUMNS)
+                if has_download_data:
+                    download_records_received += 1
                 tracking_id = values.get("trackingid")
                 normalized_tracking_id = str(tracking_id or "").strip().casefold()
                 row = row_by_tracking_id.get(normalized_tracking_id)
@@ -120,6 +136,8 @@ class TrackingSynchronizationService:
                     normalized_name = name.casefold()
                     if normalized_name in values:
                         worksheet.cell(row, column_indexes[name], values[normalized_name])
+                if has_download_data:
+                    download_rows_updated.add(row)
                 updated_rows.add(row)
             if updated_rows or columns_added:
                 workbook.save(self.excel_path)
@@ -130,6 +148,8 @@ class TrackingSynchronizationService:
                 "rows_updated": len(updated_rows),
                 "tracking_ids_matched": len(matched_tracking_ids),
                 "tracking_ids_not_found": len(tracking_ids_not_found),
+                "download_records_received": download_records_received,
+                "download_rows_updated": len(download_rows_updated),
                 "execution_time": elapsed,
                 "last_sync_time": new_last_sync_time,
                 "api_url": api_url,
@@ -146,6 +166,8 @@ class TrackingSynchronizationService:
                 rows_updated=len(updated_rows),
                 total_excel_rows_updated=len(updated_rows),
                 total_tracking_ids_not_found=len(tracking_ids_not_found),
+                download_records_received=download_records_received,
+                download_rows_updated=len(download_rows_updated),
                 full_synchronization_debug=bool(full_synchronization_debug),
                 execution_time_seconds=round(elapsed, 3),
             )

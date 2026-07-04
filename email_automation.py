@@ -22,6 +22,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from dotenv import dotenv_values
 from openpyxl import Workbook, load_workbook
 from account_service import AccountService
+from attachment_library_service import AttachmentLibraryService
 from bounce_tracking_service import BounceTrackingService
 from build_info import BUILD_TIMESTAMP_UTC
 from placeholder_service import PlaceholderService
@@ -114,6 +115,47 @@ def tracking_sync_service():
 
 def bounce_tracking_service():
     return BounceTrackingService(app_paths()["list"], app_paths()["logs"])
+
+
+def attachment_library_service():
+    return AttachmentLibraryService(TRACKING_BASE_URL, app_paths()["logs"])
+
+
+def resolve_selected_attachments(attachment_ids):
+    selected_ids = [str(value) for value in (attachment_ids or [])]
+    if not selected_ids:
+        return []
+    available = {item["id"]: item for item in attachment_library_service().list_attachments()}
+    missing = [value for value in selected_ids if value not in available]
+    if missing:
+        raise ValueError("One or more selected attachments have been deleted from the server. Refresh the attachment list and try again.")
+    return [available[value] for value in selected_ids]
+
+
+def build_attachment_links_html(tracking_id, attachments):
+    if not attachments:
+        return "", []
+    rows = ["<p><strong>Attachments</strong></p>"]
+    urls = []
+    for attachment in attachments:
+        url = f"{TRACKING_BASE_URL}/download/{tracking_id}/{quote(str(attachment['id']), safe='')}"
+        urls.append(url)
+        rows.append(f'<p>📄 <a href="{html.escape(url, quote=True)}">{html.escape(attachment["file_name"])}</a></p>')
+    return "".join(rows), urls
+
+
+def register_attachment_mapping(tracking_id, attachments):
+    if not attachments:
+        return
+    attachment_library_service().register_tracking_attachments(tracking_id, [item["id"] for item in attachments])
+
+
+def attachment_send_log(tracking_id, recipient, attachments, urls):
+    if not attachments:
+        return
+    ensure_dirs(); path = app_paths()["logs"] / f"attachment-send-{datetime.now():%Y-%m-%d}.log"
+    entry = {"timestamp": datetime.now().isoformat(), "tracking_id": tracking_id, "recipient": recipient, "attachment_ids": [item["id"] for item in attachments], "original_file_names": [item["file_name"] for item in attachments], "download_urls": urls}
+    with path.open("a", encoding="utf-8") as handle: handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def migrate_legacy_account():
@@ -300,7 +342,7 @@ def email_grid_data(excel_path=None):
     return rows, counts
 
 
-def send_pending(limit, wait_between=True, progress=None, excel_path=None):
+def send_pending(limit, wait_between=True, progress=None, excel_path=None, attachment_ids=None):
     paths = app_paths()
     if excel_path:
         paths["list"] = Path(excel_path)
@@ -308,6 +350,7 @@ def send_pending(limit, wait_between=True, progress=None, excel_path=None):
         raise ValueError("Email count must be at least 1.")
     if not paths["list"].exists():
         raise FileNotFoundError(f"Excel file not found: {paths['list']}")
+    selected_attachments = resolve_selected_attachments(attachment_ids)
     wb = load_workbook(paths["list"])
     ws = wb.active
     h = validate_sheet(ws)
@@ -352,6 +395,7 @@ def send_pending(limit, wait_between=True, progress=None, excel_path=None):
                 raise ValueError("Body is empty")
             tracking_id = str(uuid.uuid4())
             write_tracking_id(wb, ws, paths["list"], row, tracking_column, tracking_id)
+            register_attachment_mapping(tracking_id, selected_attachments)
             msg = EmailMessage()
             msg["From"] = f"{sender_name} <{sender_email}>"
             msg["To"] = email
@@ -359,7 +403,9 @@ def send_pending(limit, wait_between=True, progress=None, excel_path=None):
             msg.set_content(body)
             pixel_url = f"https://emailtrackingserver.onrender.com/email/open/{tracking_id}"
             html_body = build_click_tracked_html(body, tracking_id)
-            msg.add_alternative(f'<html><body>{html_body}<img src="{pixel_url}" width="1" height="1" style="display:none;" alt=""></body></html>', subtype="html")
+            attachment_html, download_urls = build_attachment_links_html(tracking_id, selected_attachments)
+            email_html = f'{attachment_html}<hr><p><strong>Email Body</strong></p>{html_body}' if selected_attachments else html_body
+            msg.add_alternative(f'<html><body>{email_html}<img src="{pixel_url}" width="1" height="1" style="display:none;" alt=""></body></html>', subtype="html")
             if active_sender != sender_email or smtp is None:
                 if smtp is not None:
                     try: smtp.quit()
@@ -382,6 +428,7 @@ def send_pending(limit, wait_between=True, progress=None, excel_path=None):
             ws.cell(row, h["status"], "Sent")
             ws.cell(row, h["sentdate"], datetime.now())
             ws.cell(row, h["result"], "Success")
+            attachment_send_log(tracking_id, email, selected_attachments, download_urls)
             sent += 1
             status = "Sent"
         except Exception as exc:
@@ -515,6 +562,42 @@ def setup_app():
         root.destroy()
 
 
+class AttachmentMultiSelect:
+    def __init__(self, parent, selected_ids=None):
+        self.frame = ttk.LabelFrame(parent, text="Attachments (Optional)", padding=8)
+        self.frame.pack(fill="x", pady=(8, 0))
+        self.saved_ids = [str(value) for value in (selected_ids or [])]
+        self.attachments = []
+        self.variables = {}
+        self.button_text = tk.StringVar(value="Select Attachment(s)")
+        self.button = ttk.Menubutton(self.frame, textvariable=self.button_text, width=30)
+        self.menu = tk.Menu(self.button, tearoff=False)
+        self.button.configure(menu=self.menu); self.button.pack(side="left")
+        ttk.Button(self.frame, text="Refresh", command=self.refresh).pack(side="left", padx=8)
+        self.status = tk.StringVar(value=""); ttk.Label(self.frame, textvariable=self.status).pack(side="left", padx=8)
+        self.refresh()
+    def refresh(self):
+        self.status.set("Loading attachments…"); self.saved_ids = self.selected_ids()
+        def worker():
+            try:
+                attachments = attachment_library_service().list_attachments()
+                self.frame.after(0, self.loaded, attachments)
+            except Exception as exc: self.frame.after(0, self.failed, str(exc))
+        threading.Thread(target=worker, daemon=True).start()
+    def loaded(self, attachments):
+        self.attachments = attachments; self.variables = {}; self.menu.delete(0, "end")
+        for attachment in attachments:
+            variable = tk.BooleanVar(value=attachment["id"] in self.saved_ids); self.variables[attachment["id"]] = variable
+            self.menu.add_checkbutton(label=attachment["file_name"], variable=variable, command=self.update_text)
+        self.status.set(f"{len(attachments)} available"); self.update_text()
+    def failed(self, error): self.status.set(f"Attachment server unavailable: {error}")
+    def selected_ids(self):
+        if not self.variables: return list(self.saved_ids)
+        return [attachment_id for attachment_id, variable in self.variables.items() if variable.get()]
+    def update_text(self):
+        count = len(self.selected_ids()); self.button_text.set("Select Attachment(s)" if count == 0 else f"{count} attachment(s) selected")
+
+
 class SenderWindow:
     def __init__(self, parent=None):
         self.root = tk.Toplevel(parent) if parent else tk.Tk()
@@ -532,6 +615,7 @@ class SenderWindow:
         self.excel_file = tk.StringVar(value=str(app_paths()["list"]))
         ttk.Entry(picker, textvariable=self.excel_file).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(picker, text="Browse", command=self.browse).pack(side="left")
+        self.attachment_selector = AttachmentMultiSelect(outer)
         counts = ttk.Frame(outer)
         counts.pack(fill="x", pady=(14, 12))
         self.count_vars = {key: tk.StringVar(value=f"{label}: 0") for key, label in (("total", "Total Emails"), ("sent", "Sent Emails"), ("pending", "Pending Emails"), ("failed", "Failed Emails"))}
@@ -602,6 +686,8 @@ class SenderWindow:
         self.send_button.configure(state="disabled")
         self.progress.configure(maximum=min(value, counts["pending"]), value=0)
         self.status_var.set("Preparing to send…")
+        excel_file = self.excel_file.get()
+        attachment_ids = self.attachment_selector.selected_ids()
 
         def progress(number, total, result, email):
             if result == "Sent":
@@ -612,7 +698,7 @@ class SenderWindow:
 
         def worker():
             try:
-                result = send_pending(value, True, progress, self.excel_file.get())
+                result = send_pending(value, True, progress, excel_file, attachment_ids)
                 self.root.after(0, self.on_complete, result)
             except PermissionError:
                 message = "mail_list.xlsx is open or locked. Close the Excel file, then try again."
@@ -875,7 +961,7 @@ class ScheduleEditor:
         self.result = None
         self.window = tk.Toplevel(parent)
         self.window.title("Edit Schedule" if current else "Add Schedule")
-        self.window.geometry("620x560")
+        self.window.geometry("620x680")
         self.window.resizable(False, False)
         self.window.transient(parent)
         self.window.grab_set()
@@ -901,13 +987,15 @@ class ScheduleEditor:
             variable = tk.BooleanVar(value=day in saved_days)
             self.day_vars[day] = variable
             ttk.Checkbutton(day_frame, text=day, variable=variable).grid(row=index // 2, column=index % 2, sticky="w", padx=(0, 36), pady=4)
-        ttk.Label(frame, text="Time (HH:mm):").grid(row=4, column=0, sticky="w", pady=7)
-        ttk.Entry(frame, textvariable=self.when, width=16).grid(row=4, column=1, sticky="w", pady=7)
-        ttk.Label(frame, text="Maximum Emails:").grid(row=5, column=0, sticky="w", pady=7)
-        ttk.Entry(frame, textvariable=self.maximum, width=16).grid(row=5, column=1, sticky="w", pady=7)
-        ttk.Checkbutton(frame, text="Schedule Enabled", variable=self.enabled).grid(row=6, column=1, sticky="w", pady=10)
+        attachment_host = ttk.Frame(frame); attachment_host.grid(row=4, column=0, columnspan=3, sticky="ew")
+        self.attachment_selector = AttachmentMultiSelect(attachment_host, self.current.get("attachment_ids", []))
+        ttk.Label(frame, text="Time (HH:mm):").grid(row=5, column=0, sticky="w", pady=7)
+        ttk.Entry(frame, textvariable=self.when, width=16).grid(row=5, column=1, sticky="w", pady=7)
+        ttk.Label(frame, text="Maximum Emails:").grid(row=6, column=0, sticky="w", pady=7)
+        ttk.Entry(frame, textvariable=self.maximum, width=16).grid(row=6, column=1, sticky="w", pady=7)
+        ttk.Checkbutton(frame, text="Schedule Enabled", variable=self.enabled).grid(row=7, column=1, sticky="w", pady=10)
         buttons = ttk.Frame(frame)
-        buttons.grid(row=7, column=0, columnspan=3, sticky="e", pady=(18, 0))
+        buttons.grid(row=8, column=0, columnspan=3, sticky="e", pady=(18, 0))
         ttk.Button(buttons, text="Save", command=self.save).pack(side="left", padx=5)
         ttk.Button(buttons, text="Cancel", command=self.window.destroy).pack(side="left", padx=5)
         frame.columnconfigure(1, weight=1)
@@ -940,6 +1028,7 @@ class ScheduleEditor:
                 "days": selected_days,
                 "time": self.when.get().strip(),
                 "max_emails": maximum,
+                "attachment_ids": self.attachment_selector.selected_ids(),
                 "enabled": self.enabled.get(),
             }
             self.window.destroy()
@@ -996,7 +1085,7 @@ class MultiScheduleWindow:
             item=dict(old);item["id"]=str(uuid.uuid4());item["name"] += " Copy";values.append(item);save_schedules(values);sync_schedule_task(item);self.refresh()
 
 
-class SettingsWindow:
+class GlobalSettingsWindow:
     def __init__(self, parent):
         self.root=tk.Toplevel(parent);self.root.title("Settings");self.root.geometry("520x470");self.cfg=load_config();frame=ttk.Frame(self.root,padding=18);frame.pack(fill="both",expand=True)
         ttk.Label(frame,text="Global Settings",font=("Segoe UI",16,"bold")).grid(row=0,column=0,columnspan=2,sticky="w",pady=(0,15))
@@ -1016,6 +1105,92 @@ class SettingsWindow:
             for key in ("random_delay_min","random_delay_max","retry_count","log_retention_days"):self.cfg[key]=int(self.vars[key].get())
             self.cfg["default_sender_name"]=self.vars["default_sender_name"].get().strip();self.cfg["backup_enabled"]=self.backup.get();self.cfg["theme"]=self.theme.get();save_config(self.cfg);messagebox.showinfo(APP_NAME,"Settings saved.",parent=self.root)
         except Exception as exc:messagebox.showerror(APP_NAME,str(exc),parent=self.root)
+
+
+class SettingsWindow:
+    def __init__(self, parent):
+        self.root = tk.Toplevel(parent); self.root.title("Settings"); self.root.geometry("520x300"); self.root.resizable(False, False)
+        frame = ttk.Frame(self.root, padding=24); frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Settings", font=("Segoe UI", 18, "bold")).pack(anchor="w", pady=(0, 22))
+        ttk.Button(frame, text="Global Settings", command=lambda:GlobalSettingsWindow(self.root)).pack(fill="x", ipady=16, pady=(0, 14))
+        ttk.Button(frame, text="Attachment Library", command=lambda:AttachmentLibraryWindow(self.root)).pack(fill="x", ipady=16)
+
+
+class AttachmentLibraryWindow:
+    def __init__(self, parent):
+        self.root = tk.Toplevel(parent); self.root.title("Attachment Library"); self.root.geometry("790x520")
+        self.service = attachment_library_service(); self.attachments_by_item = {}
+        frame = ttk.Frame(self.root, padding=18); frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Attachment Library", font=("Segoe UI", 17, "bold")).pack(anchor="w", pady=(0, 14))
+        self.tree = ttk.Treeview(frame, columns=("name", "size", "date"), show="headings", height=16)
+        for key, title, width in (("name", "File Name", 340), ("size", "File Size", 130), ("date", "Upload Date", 240)):
+            self.tree.heading(key, text=title); self.tree.column(key, width=width)
+        self.tree.pack(fill="both", expand=True)
+        self.progress = ttk.Progressbar(frame, mode="determinate"); self.progress.pack(fill="x", pady=(12, 4))
+        self.status = tk.StringVar(value="Ready"); ttk.Label(frame, textvariable=self.status).pack(anchor="w", pady=(0, 8))
+        bar = ttk.Frame(frame); bar.pack(fill="x")
+        self.upload_button = ttk.Button(bar, text="Upload", command=self.upload); self.upload_button.pack(side="left", padx=(0, 7))
+        self.delete_button = ttk.Button(bar, text="Delete", command=self.delete); self.delete_button.pack(side="left", padx=7)
+        self.refresh_button = ttk.Button(bar, text="Refresh", command=self.refresh); self.refresh_button.pack(side="left", padx=7)
+        ttk.Button(bar, text="Close", command=self.root.destroy).pack(side="right")
+        self.refresh()
+    @staticmethod
+    def display_size(size):
+        value = float(size)
+        for unit in ("B", "KB", "MB", "GB"):
+            if value < 1024 or unit == "GB": return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+            value /= 1024
+    def set_busy(self, busy):
+        state = "disabled" if busy else "normal"
+        self.upload_button.configure(state=state); self.delete_button.configure(state=state); self.refresh_button.configure(state=state)
+    def refresh(self):
+        self.set_busy(True); self.status.set("Loading attachments…")
+        def worker():
+            try: result = self.service.list_attachments(); self.root.after(0, self.refresh_complete, result)
+            except Exception as exc: self.root.after(0, self.failed, "Refresh", str(exc))
+        threading.Thread(target=worker, daemon=True).start()
+    def refresh_complete(self, attachments):
+        for item in self.tree.get_children(): self.tree.delete(item)
+        self.attachments_by_item.clear()
+        for index, attachment in enumerate(attachments):
+            item = self.tree.insert("", "end", values=(attachment["file_name"], self.display_size(attachment["file_size"]), attachment["upload_date"]))
+            self.attachments_by_item[item] = attachment
+        self.status.set(f"Loaded {len(attachments)} attachment(s)."); self.progress.configure(value=0); self.set_busy(False)
+    def upload(self):
+        files = filedialog.askopenfilenames(parent=self.root, title="Select attachment files")
+        if not files: return
+        self.set_busy(True); self.status.set("Uploading…"); self.progress.configure(value=0, maximum=100)
+        def worker():
+            outcomes = []
+            for file_path in files:
+                name = Path(file_path).name
+                try:
+                    self.service.upload(file_path, lambda sent,total,n=name:self.root.after(0, self.upload_progress, n, sent, total))
+                    outcomes.append((name, True, "Upload Successful"))
+                except Exception as exc: outcomes.append((name, False, f"Upload Failed: {exc}"))
+            self.root.after(0, self.upload_complete, outcomes)
+        threading.Thread(target=worker, daemon=True).start()
+    def upload_progress(self, name, sent, total):
+        self.status.set(f"Uploading... {name}"); self.progress.configure(value=(sent / total * 100) if total else 100)
+    def upload_complete(self, outcomes):
+        text = "\n".join(f"{name}: {message}" for name, _ok, message in outcomes); self.status.set(text)
+        if all(ok for _name, ok, _message in outcomes): messagebox.showinfo(APP_NAME, text, parent=self.root)
+        else: messagebox.showwarning(APP_NAME, text, parent=self.root)
+        self.set_busy(False); self.refresh()
+    def delete(self):
+        selected = self.tree.selection()
+        if not selected: messagebox.showwarning(APP_NAME, "Select an attachment to delete.", parent=self.root); return
+        attachment = self.attachments_by_item[selected[0]]
+        if not messagebox.askyesno(APP_NAME, f"Delete {attachment['file_name']}?", parent=self.root): return
+        self.set_busy(True); self.status.set("Deleting...")
+        def worker():
+            try: self.service.delete(attachment["id"]); self.root.after(0, self.delete_complete)
+            except Exception as exc: self.root.after(0, self.failed, "Delete", str(exc))
+        threading.Thread(target=worker, daemon=True).start()
+    def delete_complete(self):
+        self.status.set("Deleted Successfully"); messagebox.showinfo(APP_NAME, "Deleted Successfully", parent=self.root); self.set_busy(False); self.refresh()
+    def failed(self, operation, error):
+        self.set_busy(False); self.progress.configure(value=0); self.status.set(f"{operation} failed: {error}"); messagebox.showerror(APP_NAME, f"The attachment server is unavailable or returned an error.\n\n{error}", parent=self.root)
 
 
 class LogWindow:
@@ -1342,7 +1517,7 @@ def main():
     name = Path(sys.executable if getattr(sys, "frozen", False) else sys.argv[0]).stem.lower()
     if "--run-schedule" in sys.argv:
         try:
-            schedule_id=sys.argv[sys.argv.index("--run-schedule")+1];item=next(x for x in load_schedules() if x["id"]==schedule_id and x.get("enabled",True));send_pending(int(item["max_emails"]),True,excel_path=item["excel_file"])
+            schedule_id=sys.argv[sys.argv.index("--run-schedule")+1];item=next(x for x in load_schedules() if x["id"]==schedule_id and x.get("enabled",True));send_pending(int(item["max_emails"]),True,excel_path=item["excel_file"],attachment_ids=item.get("attachment_ids",[]))
         except Exception as exc:daily_log(status="Scheduled Run Error",error=str(exc))
         return
     if name == "email automation" or name == "emailautomation":
