@@ -45,3 +45,4 @@ Missed starts are configured to run as soon as Windows permits. A task that runs
 Use a Google App Password, not the normal Gmail password. Gmail sending limits and anti-abuse controls still apply.
 "# desktopEmailAutomationSystem" 
 "# EmailAutomationV2" 
+"# EmailAutomationV2" 
