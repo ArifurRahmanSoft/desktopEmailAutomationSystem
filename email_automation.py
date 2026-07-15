@@ -1,7 +1,8 @@
-import csv
-import html
+﻿import html
 import functools
 import json
+import logging
+import mimetypes
 import os
 import random
 import re
@@ -13,6 +14,8 @@ import threading
 import time
 import uuid
 from urllib.parse import quote
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
@@ -26,22 +29,40 @@ from attachment_library_service import AttachmentLibraryService
 from bounce_tracking_service import BounceTrackingService
 from build_info import BUILD_TIMESTAMP_UTC
 from placeholder_service import PlaceholderService
+from reply_tracking_service import ReplyTrackingService
 from tracking_sync_service import TrackingSynchronizationService, synchronization_is_due
 
 
 APP_NAME = "Email Automation"
 TASK_NAME = "The Power People Daily Email Automation"
 DEFAULT_DATA_DIR = r"F:\CODEX\Email_automation"
-DEFAULT_CONFIG = {"daily_limit": 5, "schedule_time": "09:00", "data_dir": DEFAULT_DATA_DIR, "default_sender_name": "The Power People", "random_delay_min": 5, "random_delay_max": 15, "retry_count": 1, "backup_enabled": True, "log_retention_days": 90, "theme": "Light", "tracking_sync_enabled": False, "tracking_sync_interval_hours": 5, "tracking_last_sync_time": "", "FullSynchronizationDebug": True, "bounce_check_enabled": False, "bounce_check_interval_minutes": 30}
-TRACKING_BASE_URL = "https://emailtrackingserver.onrender.com"
+DEFAULT_CONFIG = {"daily_limit": 5, "schedule_time": "09:00", "data_dir": DEFAULT_DATA_DIR, "default_sender_name": "The Power People", "random_delay_min": 5, "random_delay_max": 15, "retry_count": 1, "backup_enabled": True, "theme": "Light", "tracking_sync_enabled": False, "tracking_sync_interval_hours": 5, "tracking_last_sync_time": "", "FullSynchronizationDebug": True}
+TRACKING_BASE_URL = "https://emailtrackingserver-v2-2.onrender.com"
+SEND_REGISTRATION_ENDPOINT = "/api/tracking/register-send"
+PAGE_SIZE = 20
 
 
 def exe_dir():
     return Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 
 
+def project_dir():
+    current = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve()
+    for parent in [current.parent, *current.parents]:
+        if parent.name == "EmailAutomation" and parent.parent.name.lower() == "email automation v2":
+            return parent
+    return Path(__file__).resolve().parent
+
+
+def local_appdata_dir():
+    root = project_dir()
+    if root.name == "EmailAutomation" and root.parent.name.lower() == "email automation v2":
+        return root / ".runtime" / "LocalAppData"
+    return Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+
+
 def install_dir():
-    return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "ThePowerPeople" / "EmailAutomation"
+    return local_appdata_dir() / "ThePowerPeople" / "EmailAutomation"
 
 
 def config_path():
@@ -72,9 +93,8 @@ def app_paths(cfg=None):
         "data": data,
         "list": data / "mail_list.xlsx",
         "env": root / ".env",
-        "logs": root / "logs",
         "backup": root / "backup",
-        "reports": root / "reports",
+        "debug": root / "debug",
         "accounts": root / "config" / "accounts.json",
         "schedules": root / "config" / "schedules.json",
     }
@@ -82,27 +102,185 @@ def app_paths(cfg=None):
 
 def ensure_dirs():
     p = app_paths()
-    for key in ("root", "logs", "backup", "reports"):
+    for key in ("root", "backup"):
         p[key].mkdir(parents=True, exist_ok=True)
 
 
-def daily_log(email="", subject="", status="", error="", sender_email="", smtp_response="", execution_time="", tracking_id=""):
-    ensure_dirs()
-    now = datetime.now()
-    path = app_paths()["logs"] / f"{now:%Y-%m-%d}.log"
-    new_file = not path.exists()
-    with path.open("a", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f)
-        if new_file:
-            writer.writerow(["Date", "Time", "TrackingId", "Sender Email", "Recipient Email", "Subject", "Status", "SMTP Response", "Error Message", "Execution Time Seconds"])
-        writer.writerow([f"{now:%Y-%m-%d}", f"{now:%H:%M:%S}", tracking_id, sender_email, email, subject, status, smtp_response, error, execution_time])
+def tracking_registration_debug_log(**values):
+    try:
+        path = app_paths()["debug"] / "tracking-registration-debug.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {"timestamp": datetime.now(timezone.utc).isoformat(), **values}
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
 
 
-def startup_log():
-    ensure_dirs()
-    path = app_paths()["logs"] / "startup.log"
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(f"{datetime.now(timezone.utc).isoformat()} | Build: {BUILD_TIMESTAMP_UTC} UTC\n")
+class TrackingRegistrationFileHandler(logging.Handler):
+    def __init__(self, path):
+        super().__init__(logging.DEBUG)
+        self.path = Path(path)
+
+    def emit(self, record):
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            message = self.format(record)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(message + "\n")
+        except Exception:
+            self.handleError(record)
+
+
+def tracking_registration_logger():
+    logger = logging.getLogger("email_automation.tracking_registration")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    path = app_paths()["debug"] / "tracking-registration-debug.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = False
+    for handler in list(logger.handlers):
+        if isinstance(handler, TrackingRegistrationFileHandler) and handler.path == path:
+            existing = True
+        else:
+            logger.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
+    if not existing:
+        handler = TrackingRegistrationFileHandler(path)
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+    return logger
+
+
+def registration_failure(reason, **values):
+    tracking_registration_debug_log(event="Registration Failed", reason=reason, **values)
+    print(f"Email tracking registration failed: {reason}")
+
+
+def generate_message_id():
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    return f"<{uuid.uuid4().hex}.{timestamp}@emailautomation-v2.local>"
+
+
+def register_sent_email(tracking_id, sender_mail, recipient_mail, mail_subject, project_name, excel_file_path, sent_time, message_id):
+    logger = tracking_registration_logger()
+    payload = {
+        "tracking_id": str(tracking_id or ""),
+        "message_id": str(message_id or ""),
+        "sender_mail": str(sender_mail or ""),
+        "recipient_mail": str(recipient_mail or ""),
+        "mail_subject": str(mail_subject or ""),
+        "project_name": str(project_name or ""),
+        "excel_file_path": str(excel_file_path or ""),
+        "sent_time": str(sent_time or ""),
+    }
+    base_url = str(TRACKING_BASE_URL or "").strip().rstrip("/")
+    missing = [name for name in ("tracking_id", "message_id", "recipient_mail", "sender_mail") if not payload[name]]
+    if not base_url:
+        missing.append("TRACKING_BASE_URL")
+    url = f"{base_url}{SEND_REGISTRATION_ENDPOINT}" if base_url else SEND_REGISTRATION_ENDPOINT
+    logger.info("Calling POST /api/tracking/register-send")
+    logger.info("Full request URL: %s", url)
+    logger.info("JSON payload: %s", json.dumps(payload, ensure_ascii=False, default=str))
+    if missing:
+        registration_failure(
+            "Missing required tracking registration value(s): " + ", ".join(missing),
+            request_url=url,
+            http_method="POST",
+            payload=payload,
+        )
+        return False
+    data = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "EmailAutomation/2",
+    }
+    for attempt in (1, 2):
+        request = Request(url, data=data, method="POST", headers=headers)
+        tracking_registration_debug_log(event="Registration Request", request_url=url, http_method="POST", payload=payload, attempt=attempt)
+        try:
+            with urlopen(request, timeout=20) as response:
+                body = response.read().decode("utf-8", errors="replace")
+                status_code = getattr(response, "status", None) or (response.getcode() if hasattr(response, "getcode") else 200)
+            logger.info("HTTP status code: %s", status_code)
+            logger.info("Response body: %s", body)
+            tracking_registration_debug_log(
+                event="Registration Response",
+                request_url=url,
+                http_method="POST",
+                payload=payload,
+                response_status_code=status_code,
+                response_body=body,
+                attempt=attempt,
+            )
+            if 200 <= int(status_code) < 300:
+                return True
+            registration_failure(
+                f"Tracking registration API returned HTTP {status_code}",
+                request_url=url,
+                http_method="POST",
+                payload=payload,
+                response_status_code=status_code,
+                response_body=body,
+                attempt=attempt,
+            )
+            return False
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
+            logger.info("HTTP status code: %s", exc.code)
+            logger.info("Response body: %s", body)
+            logger.exception("Any exception")
+            registration_failure(
+                f"Tracking registration API returned HTTP {exc.code}",
+                request_url=url,
+                http_method="POST",
+                payload=payload,
+                response_status_code=exc.code,
+                response_body=body,
+                exception=str(exc),
+                attempt=attempt,
+            )
+            return False
+        except (URLError, TimeoutError, OSError) as exc:
+            logger.exception("Any exception")
+            tracking_registration_debug_log(
+                event="Registration Network Error",
+                request_url=url,
+                http_method="POST",
+                payload=payload,
+                exception=repr(exc),
+                attempt=attempt,
+                will_retry=attempt == 1,
+            )
+            if attempt == 1:
+                time.sleep(2)
+                continue
+            registration_failure(
+                f"Tracking registration network error after retry: {exc}",
+                request_url=url,
+                http_method="POST",
+                payload=payload,
+                exception=repr(exc),
+                attempt=attempt,
+            )
+            return False
+        except Exception as exc:
+            logger.exception("Any exception")
+            registration_failure(
+                f"Tracking registration failed: {exc}",
+                request_url=url,
+                http_method="POST",
+                payload=payload,
+                exception=repr(exc),
+                attempt=attempt,
+            )
+            return False
+    return False
 
 
 def account_service():
@@ -110,15 +288,62 @@ def account_service():
 
 
 def tracking_sync_service():
-    return TrackingSynchronizationService(TRACKING_BASE_URL, app_paths()["list"], app_paths()["logs"])
+    return TrackingSynchronizationService(TRACKING_BASE_URL, None, None)
 
 
 def bounce_tracking_service():
-    return BounceTrackingService(app_paths()["list"], app_paths()["logs"])
+    paths = app_paths()
+    return BounceTrackingService(TRACKING_BASE_URL, paths["debug"] / "processed-bounces.json", paths["debug"])
+
+
+def reply_tracking_service():
+    return ReplyTrackingService(TRACKING_BASE_URL, app_paths()["debug"])
+
+
+def run_bounce_detection():
+    accounts = account_service()
+    service = bounce_tracking_service()
+    totals = {"detected": 0, "registered": 0, "duplicates": 0, "skipped": 0, "errors": 0}
+    for account in accounts.list_accounts():
+        configuration = accounts.imap_configuration(account["email"]) if account.get("enabled", True) else None
+        if not configuration:
+            continue
+        try:
+            result = service.check_account(configuration)
+            for key in totals:
+                totals[key] += int(result.get(key, 0))
+        except Exception as exc:
+            totals["errors"] += 1
+            service._log("Errors", email=account.get("email"), error=str(exc))
+    return totals
+
+
+def synchronize_with_bounce(last_sync_time="", full_synchronization_debug=False):
+    first = tracking_sync_service().sync(last_sync_time, full_synchronization_debug)
+    bounce = run_bounce_detection()
+    final = dict(first)
+    final["bounce_detected"] = bounce["detected"]
+    final["bounce_registered"] = bounce["registered"]
+    final["bounce_duplicates"] = bounce["duplicates"]
+    final["bounce_skipped"] = bounce["skipped"]
+    final["bounce_errors"] = bounce["errors"]
+    final["post_bounce_sync_ran"] = False
+    if bounce["registered"]:
+        second = tracking_sync_service().sync(first.get("last_sync_time", last_sync_time), full_synchronization_debug)
+        final["post_bounce_sync_ran"] = True
+        final["records_downloaded"] = first.get("records_downloaded", 0) + second.get("records_downloaded", 0)
+        final["rows_updated"] = first.get("rows_updated", 0) + second.get("rows_updated", 0)
+        final["download_records_received"] = first.get("download_records_received", 0) + second.get("download_records_received", 0)
+        final["download_rows_updated"] = first.get("download_rows_updated", 0) + second.get("download_rows_updated", 0)
+        final["bounce_records_received"] = first.get("bounce_records_received", 0) + second.get("bounce_records_received", 0)
+        final["bounce_rows_updated"] = first.get("bounce_rows_updated", 0) + second.get("bounce_rows_updated", 0)
+        final["execution_time"] = first.get("execution_time", 0) + second.get("execution_time", 0)
+        final["last_sync_time"] = second.get("last_sync_time", first.get("last_sync_time", last_sync_time))
+    return final
 
 
 def attachment_library_service():
-    return AttachmentLibraryService(TRACKING_BASE_URL, app_paths()["logs"])
+    return AttachmentLibraryService(TRACKING_BASE_URL, None)
 
 
 def resolve_selected_attachments(attachment_ids):
@@ -150,12 +375,34 @@ def register_attachment_mapping(tracking_id, attachments):
     attachment_library_service().register_tracking_attachments(tracking_id, [item["id"] for item in attachments])
 
 
-def attachment_send_log(tracking_id, recipient, attachments, urls):
-    if not attachments:
-        return
-    ensure_dirs(); path = app_paths()["logs"] / f"attachment-send-{datetime.now():%Y-%m-%d}.log"
-    entry = {"timestamp": datetime.now().isoformat(), "tracking_id": tracking_id, "recipient": recipient, "attachment_ids": [item["id"] for item in attachments], "original_file_names": [item["file_name"] for item in attachments], "download_urls": urls}
-    with path.open("a", encoding="utf-8") as handle: handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+def local_attachment_info(path):
+    file_path = Path(path)
+    size = file_path.stat().st_size if file_path.exists() else 0
+    return {"path": str(file_path), "name": file_path.name, "size": size}
+
+
+def format_file_size(size):
+    value = float(size or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{size} B"
+
+
+def attach_local_file(message, path):
+    file_path = Path(path)
+    content_type, _encoding = mimetypes.guess_type(str(file_path))
+    if not content_type:
+        content_type = "application/octet-stream"
+    maintype, subtype = content_type.split("/", 1)
+    with file_path.open("rb") as handle:
+        message.add_attachment(handle.read(), maintype=maintype, subtype=subtype, filename=file_path.name)
+
+
+def local_attachment_warning(message, **values):
+    tracking_registration_debug_log(event="Local Attachment Warning", warning=message, **values)
+    print(f"Local attachment warning: {message}")
 
 
 def migrate_legacy_account():
@@ -279,7 +526,7 @@ def build_click_tracked_html(body, tracking_id):
         url = candidate.rstrip(trailing_punctuation)
         trailing = candidate[len(url):]
         if url:
-            destination = f"https://emailtrackingserver.onrender.com/email/click/{tracking_id}?url={quote(url, safe='')}"
+            destination = f"{TRACKING_BASE_URL}/email/click/{tracking_id}?url={quote(url, safe='')}"
             output.append(f'<a href="{html.escape(destination, quote=True)}">{html.escape(url)}</a>')
         output.append(html.escape(trailing))
         position = match.end()
@@ -309,40 +556,193 @@ def pending_count():
     return count
 
 
-def email_grid_data(excel_path=None):
-    p = Path(excel_path) if excel_path else app_paths()["list"]
-    if not p.exists():
-        return [], {"total": 0, "sent": 0, "pending": 0, "failed": 0}
-    wb = load_workbook(p, read_only=True, data_only=True)
-    ws = wb.active
-    h = header_map(ws)
-    rows = []
+def safe_cell(ws, row, column):
+    if not column:
+        return ""
+    return ws.cell(row, column).value
+
+
+def row_value(values, column):
+    if not column:
+        return ""
+    index = column - 1
+    return values[index] if 0 <= index < len(values) else ""
+
+
+def display_name_for_row(ws, h, row):
+    if h.get("name"):
+        return str(safe_cell(ws, row, h["name"]) or "")
+    first = str(safe_cell(ws, row, h.get("first_name")) or "")
+    last = str(safe_cell(ws, row, h.get("last_name")) or "")
+    return f"{first} {last}".strip()
+
+
+def page_bounds(total, page, page_size=PAGE_SIZE):
+    total_pages = max(1, (max(0, total) + page_size - 1) // page_size)
+    page = min(max(1, int(page or 1)), total_pages)
+    start = (page - 1) * page_size
+    end = min(start + page_size, max(0, total))
+    return page, total_pages, start, end
+
+
+def sortable_text(value):
+    return str(value or "").casefold()
+
+
+def row_matches(row_values, query):
+    query = str(query or "").strip().casefold()
+    return not query or query in " ".join(str(value or "") for value in row_values).casefold()
+
+
+def email_row_values(ws, h, row):
+    return (
+        display_name_for_row(ws, h, row),
+        str(safe_cell(ws, row, h.get("email")) or ""),
+        str(safe_cell(ws, row, h.get("status")) or "").strip(),
+        str(safe_cell(ws, row, h.get("sentdate")) or ""),
+        str(safe_cell(ws, row, h.get("result")) or ""),
+    )
+
+
+def email_row_values_from_values(values, h):
+    if h.get("name"):
+        display_name = str(row_value(values, h["name"]) or "")
+    else:
+        first = str(row_value(values, h.get("first_name")) or "")
+        last = str(row_value(values, h.get("last_name")) or "")
+        display_name = f"{first} {last}".strip()
+    return (
+        display_name,
+        str(row_value(values, h.get("email")) or ""),
+        str(row_value(values, h.get("status")) or "").strip(),
+        str(row_value(values, h.get("sentdate")) or ""),
+        str(row_value(values, h.get("result")) or ""),
+    )
+
+
+def email_counts_from_sheet(ws, h):
     counts = {"total": 0, "sent": 0, "pending": 0, "failed": 0}
-    for row in range(2, ws.max_row + 1):
-        status = str(ws.cell(row, h.get("status", 0)).value or "").strip()
-        if h.get("name"):
-            display_name = str(ws.cell(row, h["name"]).value or "")
-        else:
-            first = str(ws.cell(row, h["first_name"]).value or "") if h.get("first_name") else ""
-            last = str(ws.cell(row, h["last_name"]).value or "") if h.get("last_name") else ""
-            display_name = f"{first} {last}".strip()
-        item = (
-            display_name,
-            str(ws.cell(row, h.get("email", 0)).value or "") if h.get("email") else "",
-            status,
-            str(ws.cell(row, h.get("sentdate", 0)).value or "") if h.get("sentdate") else "",
-            str(ws.cell(row, h.get("result", 0)).value or "") if h.get("result") else "",
-        )
-        rows.append(item)
+    for values in ws.iter_rows(min_row=2, values_only=True):
+        status = str(row_value(values, h.get("status")) or "").strip()
         counts["total"] += 1
         key = status.lower()
         if key in counts:
             counts[key] += 1
+    return counts
+
+
+def email_grid_page(excel_path=None, page=1, page_size=PAGE_SIZE, search="", sort_key="", sort_reverse=False):
+    p = Path(excel_path) if excel_path else app_paths()["list"]
+    if not p.exists():
+        return {"rows": [], "counts": {"total": 0, "sent": 0, "pending": 0, "failed": 0}, "page": 1, "total_pages": 1, "filtered_total": 0}
+    wb = load_workbook(p, read_only=True, data_only=True)
+    ws = wb.active
+    h = header_map(ws)
+    counts = {"total": 0, "sent": 0, "pending": 0, "failed": 0}
+    sort_indexes = {"name": 0, "email": 1, "status": 2, "sentdate": 3, "result": 4}
+    query = str(search or "").strip()
+    sort_index = sort_indexes.get(sort_key)
+    if query or sort_index is not None:
+        filtered = []
+        for values in ws.iter_rows(min_row=2, values_only=True):
+            status = str(row_value(values, h.get("status")) or "").strip()
+            counts["total"] += 1
+            key = status.lower()
+            if key in counts:
+                counts[key] += 1
+            row = email_row_values_from_values(values, h)
+            if row_matches(row, query):
+                filtered.append(row)
+        if sort_index is not None:
+            filtered.sort(key=lambda item: sortable_text(item[sort_index]), reverse=bool(sort_reverse))
+        current_page, total_pages, start, end = page_bounds(len(filtered), page, page_size)
+        rows = filtered[start:end]
+        filtered_total = len(filtered)
+    else:
+        requested_page = max(1, int(page or 1))
+        start = (requested_page - 1) * page_size
+        end = start + page_size
+        rows = []
+        for index, values in enumerate(ws.iter_rows(min_row=2, values_only=True)):
+            status = str(row_value(values, h.get("status")) or "").strip()
+            counts["total"] += 1
+            key = status.lower()
+            if key in counts:
+                counts[key] += 1
+            if start <= index < end:
+                rows.append(email_row_values_from_values(values, h))
+        filtered_total = counts["total"]
+        current_page, total_pages, start, end = page_bounds(filtered_total, page, page_size)
+        if current_page != requested_page:
+            rows = []
+            for index, values in enumerate(ws.iter_rows(min_row=2, values_only=True)):
+                if start <= index < end:
+                    rows.append(email_row_values_from_values(values, h))
     wb.close()
-    return rows, counts
+    return {"rows": rows, "counts": counts, "page": current_page, "total_pages": total_pages, "filtered_total": filtered_total}
 
 
-def send_pending(limit, wait_between=True, progress=None, excel_path=None, attachment_ids=None):
+def email_grid_data(excel_path=None):
+    page = email_grid_page(excel_path, page=1, page_size=PAGE_SIZE)
+    return page["rows"], page["counts"]
+
+
+def dashboard_excel_summary(page=1, page_size=PAGE_SIZE, search="", sort_key="sender", sort_reverse=False):
+    counts = {"total": 0, "sent": 0, "pending": 0, "failed": 0}
+    today_sent = today_failed = weekly_sent = monthly_sent = 0
+    per = {}
+    p = app_paths()["list"]
+    if p.exists():
+        wb = load_workbook(p, read_only=True, data_only=True)
+        ws = wb.active
+        h = header_map(ws)
+        now = datetime.now()
+        for values in ws.iter_rows(min_row=2, values_only=True):
+            status = str(row_value(values, h.get("status")) or "")
+            key = status.lower()
+            counts["total"] += 1
+            if key in counts:
+                counts[key] += 1
+            sender_key = h.get("sender_email") or h.get("sender_mail")
+            sender = str(row_value(values, sender_key) or "") if sender_key else ""
+            entry = per.setdefault(sender, {"sent_today": 0, "pending": 0})
+            if key == "pending":
+                entry["pending"] += 1
+            date = row_value(values, h.get("sentdate")) if h.get("sentdate") else None
+            is_today = isinstance(date, datetime) and date.date() == now.date()
+            is_week = isinstance(date, datetime) and 0 <= (now.date() - date.date()).days < 7
+            is_month = isinstance(date, datetime) and date.year == now.year and date.month == now.month
+            if key == "sent":
+                entry["sent_today"] += int(is_today)
+                today_sent += int(is_today)
+                weekly_sent += int(is_week)
+                monthly_sent += int(is_month)
+            if key == "failed" and is_today:
+                today_failed += 1
+        wb.close()
+    rows = [(sender, value["sent_today"], value["pending"]) for sender, value in per.items()]
+    query = str(search or "").strip()
+    if query:
+        rows = [row for row in rows if row_matches(row, query)]
+    sort_indexes = {"sender": 0, "sent": 1, "pending": 2}
+    sort_index = sort_indexes.get(sort_key)
+    if sort_index is not None:
+        rows.sort(key=lambda item: sortable_text(item[sort_index]), reverse=bool(sort_reverse))
+    current_page, total_pages, start, end = page_bounds(len(rows), page, page_size)
+    return {
+        "counts": counts,
+        "today_sent": today_sent,
+        "today_failed": today_failed,
+        "weekly_sent": weekly_sent,
+        "monthly_sent": monthly_sent,
+        "per_rows": rows[start:end],
+        "per_page": current_page,
+        "per_total_pages": total_pages,
+        "per_filtered_total": len(rows),
+    }
+
+
+def send_pending(limit, wait_between=True, progress=None, excel_path=None, attachment_ids=None, attachment_source="Attachment Library", local_attachment_paths=None):
     paths = app_paths()
     if excel_path:
         paths["list"] = Path(excel_path)
@@ -350,7 +750,17 @@ def send_pending(limit, wait_between=True, progress=None, excel_path=None, attac
         raise ValueError("Email count must be at least 1.")
     if not paths["list"].exists():
         raise FileNotFoundError(f"Excel file not found: {paths['list']}")
-    selected_attachments = resolve_selected_attachments(attachment_ids)
+    use_local_attachments = str(attachment_source or "Attachment Library") == "Local File"
+    selected_attachments = [] if use_local_attachments else resolve_selected_attachments(attachment_ids)
+    local_attachment_paths = [str(value) for value in (local_attachment_paths or []) if str(value or "").strip()]
+    local_attachments = []
+    if use_local_attachments:
+        for value in local_attachment_paths:
+            file_path = Path(value)
+            if file_path.exists() and file_path.is_file():
+                local_attachments.append(file_path)
+            else:
+                local_attachment_warning("Local attachment file missing; skipped.", path=str(file_path))
     wb = load_workbook(paths["list"])
     ws = wb.active
     h = validate_sheet(ws)
@@ -380,6 +790,12 @@ def send_pending(limit, wait_between=True, progress=None, excel_path=None, attac
             context = PlaceholderService.create_context(headers, values)
             subject = PlaceholderService.render(ws.cell(row, h["subject"]).value, context).strip()
             body = PlaceholderService.render(ws.cell(row, h["body"]).value, context).strip()
+            project_name = str(
+                context.get("project_name")
+                or context.get("project name")
+                or context.get("project")
+                or ""
+            ).strip()
             sender_name = str(ws.cell(row, h["sender_name"]).value or "").strip() if h.get("sender_name") else ""
             sender_name = PlaceholderService.render(sender_name, context).strip() or default_sender_name
             sender_column = h.get("sender_email") or h.get("sender_mail")
@@ -395,17 +811,24 @@ def send_pending(limit, wait_between=True, progress=None, excel_path=None, attac
                 raise ValueError("Body is empty")
             tracking_id = str(uuid.uuid4())
             write_tracking_id(wb, ws, paths["list"], row, tracking_column, tracking_id)
-            register_attachment_mapping(tracking_id, selected_attachments)
+            if not use_local_attachments:
+                register_attachment_mapping(tracking_id, selected_attachments)
+            generated_message_id = generate_message_id()
             msg = EmailMessage()
-            msg["From"] = f"{sender_name} <{sender_email}>"
+            msg["From"] = f"{sender_name} <{AccountService.sender_address(smtp_configuration)}>"
             msg["To"] = email
             msg["Subject"] = subject
+            if "Message-ID" not in msg:
+                msg["Message-ID"] = generated_message_id
             msg.set_content(body)
-            pixel_url = f"https://emailtrackingserver.onrender.com/email/open/{tracking_id}"
+            pixel_url = f"{TRACKING_BASE_URL}/email/open/{tracking_id}"
             html_body = build_click_tracked_html(body, tracking_id)
-            attachment_html, download_urls = build_attachment_links_html(tracking_id, selected_attachments)
-            email_html = f'{attachment_html}<hr><p><strong>Email Body</strong></p>{html_body}' if selected_attachments else html_body
+            attachment_html, _download_urls = build_attachment_links_html(tracking_id, selected_attachments) if not use_local_attachments else ("", [])
+            email_html = f"{attachment_html}<hr>{html_body}" if attachment_html else html_body
             msg.add_alternative(f'<html><body>{email_html}<img src="{pixel_url}" width="1" height="1" style="display:none;" alt=""></body></html>', subtype="html")
+            if use_local_attachments:
+                for file_path in local_attachments:
+                    attach_local_file(msg, file_path)
             if active_sender != sender_email or smtp is None:
                 if smtp is not None:
                     try: smtp.quit()
@@ -417,6 +840,21 @@ def send_pending(limit, wait_between=True, progress=None, excel_path=None, attac
             for attempt in range(attempts):
                 try:
                     smtp.send_message(msg)
+                    print("REAL SEND FUNCTION REACHED", flush=True)
+                    tracking_registration_debug_log(event="REAL SEND FUNCTION REACHED", recipient_mail=email, tracking_id=tracking_id, generated_message_id=generated_message_id)
+                    tracking_registration_debug_log(event="SMTP send successful", tracking_id=tracking_id, generated_message_id=generated_message_id, recipient_mail=email)
+                    tracking_registration_logger().info("SMTP send successful tracking_id=%s generated_message_id=%s", tracking_id, generated_message_id)
+                    sent_time = datetime.now(timezone.utc).isoformat()
+                    register_sent_email(
+                        tracking_id=tracking_id,
+                        message_id=generated_message_id,
+                        sender_mail=sender_email,
+                        recipient_mail=email,
+                        mail_subject=subject,
+                        project_name=project_name,
+                        excel_file_path=str(paths["list"].resolve()),
+                        sent_time=sent_time,
+                    )
                     last_error = None
                     break
                 except Exception as exc:
@@ -428,7 +866,6 @@ def send_pending(limit, wait_between=True, progress=None, excel_path=None, attac
             ws.cell(row, h["status"], "Sent")
             ws.cell(row, h["sentdate"], datetime.now())
             ws.cell(row, h["result"], "Success")
-            attachment_send_log(tracking_id, email, selected_attachments, download_urls)
             sent += 1
             status = "Sent"
         except Exception as exc:
@@ -439,7 +876,6 @@ def send_pending(limit, wait_between=True, progress=None, excel_path=None, attac
             failed += 1
             status = "Failed"
         wb.save(paths["list"])
-        daily_log(email=email, subject=subject, status=status, error=error, sender_email=sender_email, smtp_response="Accepted" if status == "Sent" else "", execution_time=f"{time.monotonic()-started:.3f}", tracking_id=tracking_id)
         if progress:
             progress(pos + 1, len(rows), status, email)
         if wait_between and pos < len(rows) - 1:
@@ -536,7 +972,7 @@ def setup_app():
     root = tk.Tk(); root.withdraw()
     try:
         dest = install_dir(); dest.mkdir(parents=True, exist_ok=True)
-        for folder in ("config", "logs", "backup", "reports"):
+        for folder in ("config", "backup"):
             (dest / folder).mkdir(exist_ok=True)
         source = exe_dir()
         for name in ("SendPendingEmails.exe", "ConfigureSchedule.exe", "VerifyInstallation.exe"):
@@ -563,19 +999,50 @@ def setup_app():
 
 
 class AttachmentMultiSelect:
-    def __init__(self, parent, selected_ids=None):
+    SOURCES = ("Attachment Library", "Local File")
+
+    def __init__(self, parent, selected_ids=None, source="Attachment Library", local_paths=None):
         self.frame = ttk.LabelFrame(parent, text="Attachments (Optional)", padding=8)
         self.frame.pack(fill="x", pady=(8, 0))
         self.saved_ids = [str(value) for value in (selected_ids or [])]
+        self.local_paths = [str(value) for value in (local_paths or []) if str(value or "").strip()]
         self.attachments = []
         self.variables = {}
+        self.source = tk.StringVar(value=source if source in self.SOURCES else "Attachment Library")
+        source_row = ttk.Frame(self.frame); source_row.pack(fill="x")
+        ttk.Label(source_row, text="Attachment Source:").pack(side="left")
+        self.source_box = ttk.Combobox(source_row, textvariable=self.source, values=self.SOURCES, state="readonly", width=22)
+        self.source_box.pack(side="left", padx=8)
+        self.source_box.bind("<<ComboboxSelected>>", lambda _event: self.update_source())
+        self.library_frame = ttk.Frame(self.frame)
+        self.local_frame = ttk.Frame(self.frame)
         self.button_text = tk.StringVar(value="Select Attachment(s)")
-        self.button = ttk.Menubutton(self.frame, textvariable=self.button_text, width=30)
+        self.button = ttk.Menubutton(self.library_frame, textvariable=self.button_text, width=30)
         self.menu = tk.Menu(self.button, tearoff=False)
-        self.button.configure(menu=self.menu); self.button.pack(side="left")
-        ttk.Button(self.frame, text="Refresh", command=self.refresh).pack(side="left", padx=8)
-        self.status = tk.StringVar(value=""); ttk.Label(self.frame, textvariable=self.status).pack(side="left", padx=8)
+        self.button.configure(menu=self.menu); self.button.pack(side="left", pady=(8, 0))
+        ttk.Button(self.library_frame, text="Refresh", command=self.refresh).pack(side="left", padx=8, pady=(8, 0))
+        self.status = tk.StringVar(value=""); ttk.Label(self.library_frame, textvariable=self.status).pack(side="left", padx=8, pady=(8, 0))
+        local_buttons = ttk.Frame(self.local_frame); local_buttons.pack(fill="x", pady=(8, 4))
+        ttk.Button(local_buttons, text="Browse Local File(s)", command=self.browse_local_files).pack(side="left")
+        ttk.Button(local_buttons, text="Remove Selected", command=self.remove_selected_local_files).pack(side="left", padx=8)
+        self.local_status = tk.StringVar(value="")
+        ttk.Label(local_buttons, textvariable=self.local_status).pack(side="left", padx=8)
+        self.local_tree = ttk.Treeview(self.local_frame, columns=("name", "size", "path"), show="headings", height=4)
+        for key, title, width in (("name", "File Name", 180), ("size", "File Size", 80), ("path", "Full Local Path", 430)):
+            self.local_tree.heading(key, text=title); self.local_tree.column(key, width=width, minwidth=60)
+        self.local_tree.pack(fill="x")
+        self.refresh_local_files()
+        self.update_source()
         self.refresh()
+
+    def update_source(self):
+        if self.source.get() == "Local File":
+            self.library_frame.pack_forget()
+            self.local_frame.pack(fill="x")
+        else:
+            self.local_frame.pack_forget()
+            self.library_frame.pack(fill="x")
+
     def refresh(self):
         self.status.set("Loading attachments…"); self.saved_ids = self.selected_ids()
         def worker():
@@ -584,18 +1051,55 @@ class AttachmentMultiSelect:
                 self.frame.after(0, self.loaded, attachments)
             except Exception as exc: self.frame.after(0, self.failed, str(exc))
         threading.Thread(target=worker, daemon=True).start()
+
     def loaded(self, attachments):
         self.attachments = attachments; self.variables = {}; self.menu.delete(0, "end")
         for attachment in attachments:
             variable = tk.BooleanVar(value=attachment["id"] in self.saved_ids); self.variables[attachment["id"]] = variable
             self.menu.add_checkbutton(label=attachment["file_name"], variable=variable, command=self.update_text)
         self.status.set(f"{len(attachments)} available"); self.update_text()
+
     def failed(self, error): self.status.set(f"Attachment server unavailable: {error}")
+
     def selected_ids(self):
         if not self.variables: return list(self.saved_ids)
         return [attachment_id for attachment_id, variable in self.variables.items() if variable.get()]
+
+    def selected_source(self):
+        return self.source.get()
+
+    def selected_local_paths(self):
+        return list(self.local_paths)
+
     def update_text(self):
         count = len(self.selected_ids()); self.button_text.set("Select Attachment(s)" if count == 0 else f"{count} attachment(s) selected")
+
+    def browse_local_files(self):
+        values = filedialog.askopenfilenames(parent=self.frame.winfo_toplevel(), title="Select local attachment file(s)")
+        for value in values:
+            if value and value not in self.local_paths:
+                self.local_paths.append(value)
+        self.refresh_local_files()
+
+    def remove_selected_local_files(self):
+        selected_paths = {self.local_tree.item(item, "values")[2] for item in self.local_tree.selection()}
+        self.local_paths = [value for value in self.local_paths if value not in selected_paths]
+        self.refresh_local_files()
+
+    def refresh_local_files(self):
+        for item in self.local_tree.get_children():
+            self.local_tree.delete(item)
+        missing = 0
+        for value in self.local_paths:
+            file_path = Path(value)
+            if file_path.exists() and file_path.is_file():
+                info = local_attachment_info(file_path)
+                self.local_tree.insert("", "end", values=(info["name"], format_file_size(info["size"]), info["path"]))
+            else:
+                missing += 1
+                self.local_tree.insert("", "end", values=(file_path.name, "Missing", str(file_path)))
+        total = len(self.local_paths)
+        self.local_status.set(f"{total} selected" if not missing else f"{total} selected, {missing} missing")
 
 
 class SenderWindow:
@@ -607,6 +1111,12 @@ class SenderWindow:
         self.sending = False
         self.batch_sent = 0
         self.batch_failed = 0
+        self.page = 1
+        self.sort_key = ""
+        self.sort_reverse = False
+        self.total_pages = 1
+        self.selected_rows = set()
+        self.restoring_selection = False
         outer = ttk.Frame(self.root, padding=16)
         outer.pack(fill="both", expand=True)
         ttk.Label(outer, text="Email Sending Dashboard", font=("Segoe UI", 17, "bold")).pack(anchor="w")
@@ -616,6 +1126,12 @@ class SenderWindow:
         ttk.Entry(picker, textvariable=self.excel_file).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(picker, text="Browse", command=self.browse).pack(side="left")
         self.attachment_selector = AttachmentMultiSelect(outer)
+        search_bar = ttk.Frame(outer); search_bar.pack(fill="x", pady=(10, 0))
+        ttk.Label(search_bar, text="Search:").pack(side="left")
+        self.search = tk.StringVar()
+        ttk.Entry(search_bar, textvariable=self.search, width=34).pack(side="left", padx=7)
+        ttk.Button(search_bar, text="Search", command=lambda: self.refresh(reset_page=True)).pack(side="left")
+        ttk.Button(search_bar, text="Clear", command=self.clear_search).pack(side="left", padx=7)
         counts = ttk.Frame(outer)
         counts.pack(fill="x", pady=(14, 12))
         self.count_vars = {key: tk.StringVar(value=f"{label}: 0") for key, label in (("total", "Total Emails"), ("sent", "Sent Emails"), ("pending", "Pending Emails"), ("failed", "Failed Emails"))}
@@ -624,14 +1140,31 @@ class SenderWindow:
         columns = ("name", "email", "status", "sentdate", "result")
         self.grid = ttk.Treeview(outer, columns=columns, show="headings", height=17)
         for key, title, width in (("name", "Name", 150), ("email", "Email", 220), ("status", "Status", 90), ("sentdate", "Sent Date", 150), ("result", "Result", 240)):
-            self.grid.heading(key, text=title)
+            self.grid.heading(key, text=title, command=lambda value=key: self.sort_by(value))
             self.grid.column(key, width=width, minwidth=70)
         scroll = ttk.Scrollbar(outer, orient="vertical", command=self.grid.yview)
         self.grid.configure(yscrollcommand=scroll.set)
-        self.grid.pack(side="left", fill="both", expand=True, pady=(0, 75))
-        scroll.pack(side="left", fill="y", pady=(0, 75))
-        controls = ttk.Frame(self.root, padding=(16, 8, 16, 14))
-        controls.place(relx=0, rely=1, relwidth=1, anchor="sw")
+        self.grid.bind("<<TreeviewSelect>>", self.remember_selection)
+        self.grid.pack(side="left", fill="both", expand=True, pady=(0, 108))
+        scroll.pack(side="left", fill="y", pady=(0, 108))
+        bottom = ttk.Frame(self.root, padding=(16, 6, 16, 12))
+        bottom.place(relx=0, rely=1, relwidth=1, anchor="sw")
+        paging = ttk.Frame(bottom)
+        paging.pack(fill="x", pady=(0, 6))
+        self.first_button = ttk.Button(paging, text="First", command=lambda: self.goto_page(1))
+        self.first_button.pack(side="left")
+        self.previous_button = ttk.Button(paging, text="Previous", command=lambda: self.goto_page(self.page - 1))
+        self.previous_button.pack(side="left", padx=(6, 0))
+        self.page_label = tk.StringVar(value="Page 1 of 1")
+        ttk.Label(paging, textvariable=self.page_label).pack(side="left", padx=12)
+        self.next_button = ttk.Button(paging, text="Next", command=lambda: self.goto_page(self.page + 1))
+        self.next_button.pack(side="left")
+        self.last_button = ttk.Button(paging, text="Last", command=lambda: self.goto_page(self.total_pages))
+        self.last_button.pack(side="left", padx=(6, 0))
+        self.filtered_label = tk.StringVar(value="0 rows")
+        ttk.Label(paging, textvariable=self.filtered_label).pack(side="left", padx=12)
+        controls = ttk.Frame(bottom)
+        controls.pack(fill="x")
         self.send_button = ttk.Button(controls, text="Send Pending Emails", command=self.start_send)
         self.send_button.pack(side="left")
         ttk.Button(controls, text="Refresh", command=self.refresh).pack(side="left", padx=8)
@@ -656,13 +1189,70 @@ class SenderWindow:
         toast.geometry(f"+{x}+{y}")
         toast.after(duration, toast.destroy)
 
-    def refresh(self):
+    def clear_search(self):
+        self.search.set("")
+        self.refresh(reset_page=True)
+
+    def sort_by(self, key):
+        if self.sort_key == key:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_key = key
+            self.sort_reverse = False
+        self.refresh(reset_page=True)
+
+    @staticmethod
+    def selection_key(values):
+        return tuple(str(value) for value in values)
+
+    def remember_selection(self, _event=None):
+        if self.restoring_selection:
+            return
+        visible = {self.selection_key(self.grid.item(item, "values")) for item in self.grid.get_children()}
+        selected = {self.selection_key(self.grid.item(item, "values")) for item in self.grid.selection()}
+        self.selected_rows.difference_update(visible - selected)
+        self.selected_rows.update(selected)
+
+    def goto_page(self, page):
+        self.remember_selection()
         try:
-            rows, counts = email_grid_data(self.excel_file.get())
+            self.page = int(page)
+        except Exception:
+            self.page = 1
+        self.refresh()
+
+    def update_paging_controls(self, filtered_total):
+        self.page_label.set(f"Page {self.page} of {self.total_pages}")
+        self.filtered_label.set(f"{filtered_total} rows")
+        first_state = "disabled" if self.page <= 1 else "normal"
+        last_state = "disabled" if self.page >= self.total_pages else "normal"
+        self.first_button.configure(state=first_state)
+        self.previous_button.configure(state=first_state)
+        self.next_button.configure(state=last_state)
+        self.last_button.configure(state=last_state)
+
+    def refresh(self, reset_page=False):
+        try:
+            self.remember_selection()
+            if reset_page:
+                self.page = 1
+            page = email_grid_page(self.excel_file.get(), page=self.page, page_size=PAGE_SIZE, search=self.search.get(), sort_key=self.sort_key, sort_reverse=self.sort_reverse)
+            rows, counts = page["rows"], page["counts"]
+            self.page = page["page"]
+            self.total_pages = page["total_pages"]
+            self.update_paging_controls(page["filtered_total"])
             for item in self.grid.get_children():
                 self.grid.delete(item)
+            selected_items = []
             for row in rows:
-                self.grid.insert("", "end", values=row)
+                item = self.grid.insert("", "end", values=row)
+                if self.selection_key(row) in self.selected_rows:
+                    selected_items.append(item)
+            self.restoring_selection = True
+            try:
+                self.grid.selection_set(*selected_items)
+            finally:
+                self.restoring_selection = False
             labels = {"total": "Total Emails", "sent": "Sent Emails", "pending": "Pending Emails", "failed": "Failed Emails"}
             for key, label in labels.items():
                 self.count_vars[key].set(f"{label}: {counts[key]}")
@@ -687,7 +1277,17 @@ class SenderWindow:
         self.progress.configure(maximum=min(value, counts["pending"]), value=0)
         self.status_var.set("Preparing to send…")
         excel_file = self.excel_file.get()
+        attachment_source = self.attachment_selector.selected_source()
         attachment_ids = self.attachment_selector.selected_ids()
+        local_attachment_paths = self.attachment_selector.selected_local_paths()
+        if attachment_source == "Local File":
+            missing = [path for path in local_attachment_paths if not Path(path).exists()]
+            if missing:
+                self.sending = False
+                self.send_button.configure(state="normal")
+                self.status_var.set("Ready")
+                messagebox.showwarning(APP_NAME, "One or more selected local attachment files are missing:\n\n" + "\n".join(missing[:10]), parent=self.root)
+                return
 
         def progress(number, total, result, email):
             if result == "Sent":
@@ -698,14 +1298,12 @@ class SenderWindow:
 
         def worker():
             try:
-                result = send_pending(value, True, progress, excel_file, attachment_ids)
+                result = send_pending(value, True, progress, excel_file, attachment_ids, attachment_source, local_attachment_paths)
                 self.root.after(0, self.on_complete, result)
             except PermissionError:
                 message = "mail_list.xlsx is open or locked. Close the Excel file, then try again."
-                daily_log(status="System Error", error=message)
                 self.root.after(0, self.on_error, message)
             except Exception as exc:
-                daily_log(status="System Error", error=str(exc))
                 self.root.after(0, self.on_error, str(exc))
         threading.Thread(target=worker, daemon=True).start()
 
@@ -747,7 +1345,7 @@ class SenderWindow:
 
     def browse(self):
         value = filedialog.askopenfilename(parent=self.root, title="Select mail_list.xlsx", filetypes=[("Excel files", "*.xlsx")])
-        if value: self.excel_file.set(value); self.refresh()
+        if value: self.excel_file.set(value); self.refresh(reset_page=True)
 
 
 def manual_send():
@@ -808,12 +1406,13 @@ class MailAccountEditor:
     def __init__(self, parent, account=None):
         self.account = account or {}
         self.result = None
-        self.window = tk.Toplevel(parent); self.window.title("Edit Mail Account" if account else "Add Mail Account"); self.window.geometry("620x650"); self.window.resizable(False, False); self.window.transient(parent); self.window.grab_set()
+        self.window = tk.Toplevel(parent); self.window.title("Edit Mail Account" if account else "Add Mail Account"); self.window.geometry("620x720"); self.window.resizable(False, False); self.window.transient(parent); self.window.grab_set()
         frame = ttk.Frame(self.window, padding=20); frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="Mail Provider Account", font=("Segoe UI", 16, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 16))
         self.provider = tk.StringVar(value=self.account.get("provider", "Gmail"))
         self.display_name = tk.StringVar(value=self.account.get("display_name", self.account.get("name", "")))
         self.email = tk.StringVar(value=self.account.get("email", ""))
+        self.sender_alias = tk.StringVar(value=self.account.get("sender_alias", ""))
         self.host = tk.StringVar(value=self.account.get("smtp_host", "smtp.gmail.com"))
         self.port = tk.StringVar(value=str(self.account.get("smtp_port", 587)))
         self.encryption = tk.StringVar(value=self.account.get("encryption", "STARTTLS"))
@@ -822,22 +1421,24 @@ class MailAccountEditor:
         self.imap_encryption = tk.StringVar(value=self.account.get("imap_encryption", "SSL/TLS"))
         self.password = tk.StringVar()
         self.enabled = tk.BooleanVar(value=self.account.get("enabled", True))
-        labels = (("Mail Provider:", 1), ("Display Name:", 2), ("Email Address:", 3), ("SMTP Host:", 4), ("SMTP Port:", 5), ("SMTP Encryption:", 6), ("IMAP Host:", 7), ("IMAP Port:", 8), ("IMAP Encryption:", 9), ("Password / App Password:", 10))
+        labels = (("Mail Provider:", 1), ("Display Name:", 2), ("Email Address:", 3), ("Sender Alias (Optional):", 4), ("SMTP Host:", 6), ("SMTP Port:", 7), ("SMTP Encryption:", 8), ("IMAP Host:", 9), ("IMAP Port:", 10), ("IMAP Encryption:", 11), ("Password / App Password:", 12))
         for text, row in labels: ttk.Label(frame, text=text).grid(row=row, column=0, sticky="w", pady=7)
         self.provider_box = ttk.Combobox(frame, textvariable=self.provider, values=AccountService.PROVIDERS, state="readonly", width=32); self.provider_box.grid(row=1, column=1, sticky="w"); self.provider_box.bind("<<ComboboxSelected>>", self.provider_changed)
         ttk.Entry(frame, textvariable=self.display_name, width=38).grid(row=2, column=1, sticky="w")
         ttk.Entry(frame, textvariable=self.email, width=38).grid(row=3, column=1, sticky="w")
-        self.host_entry = ttk.Entry(frame, textvariable=self.host, width=38); self.host_entry.grid(row=4, column=1, sticky="w")
-        self.port_entry = ttk.Entry(frame, textvariable=self.port, width=15); self.port_entry.grid(row=5, column=1, sticky="w")
-        self.encryption_box = ttk.Combobox(frame, textvariable=self.encryption, values=AccountService.ENCRYPTION_TYPES, state="readonly", width=32); self.encryption_box.grid(row=6, column=1, sticky="w")
-        self.imap_host_entry = ttk.Entry(frame, textvariable=self.imap_host, width=38); self.imap_host_entry.grid(row=7, column=1, sticky="w")
-        self.imap_port_entry = ttk.Entry(frame, textvariable=self.imap_port, width=15); self.imap_port_entry.grid(row=8, column=1, sticky="w")
-        self.imap_encryption_box = ttk.Combobox(frame, textvariable=self.imap_encryption, values=AccountService.ENCRYPTION_TYPES, state="readonly", width=32); self.imap_encryption_box.grid(row=9, column=1, sticky="w")
-        ttk.Entry(frame, textvariable=self.password, show="*", width=38).grid(row=10, column=1, sticky="w")
+        self.sender_alias_entry = ttk.Entry(frame, textvariable=self.sender_alias, width=38); self.sender_alias_entry.grid(row=4, column=1, sticky="w")
+        ttk.Label(frame, text="For Gmail verified 'Send mail as' aliases only.", foreground="#555").grid(row=5, column=1, sticky="w", pady=(0, 4))
+        self.host_entry = ttk.Entry(frame, textvariable=self.host, width=38); self.host_entry.grid(row=6, column=1, sticky="w")
+        self.port_entry = ttk.Entry(frame, textvariable=self.port, width=15); self.port_entry.grid(row=7, column=1, sticky="w")
+        self.encryption_box = ttk.Combobox(frame, textvariable=self.encryption, values=AccountService.ENCRYPTION_TYPES, state="readonly", width=32); self.encryption_box.grid(row=8, column=1, sticky="w")
+        self.imap_host_entry = ttk.Entry(frame, textvariable=self.imap_host, width=38); self.imap_host_entry.grid(row=9, column=1, sticky="w")
+        self.imap_port_entry = ttk.Entry(frame, textvariable=self.imap_port, width=15); self.imap_port_entry.grid(row=10, column=1, sticky="w")
+        self.imap_encryption_box = ttk.Combobox(frame, textvariable=self.imap_encryption, values=AccountService.ENCRYPTION_TYPES, state="readonly", width=32); self.imap_encryption_box.grid(row=11, column=1, sticky="w")
+        ttk.Entry(frame, textvariable=self.password, show="*", width=38).grid(row=12, column=1, sticky="w")
         password_note = "Leave empty while editing to keep the stored password." if account else "Gmail requires a Google App Password."
-        ttk.Label(frame, text=password_note, foreground="#555").grid(row=11, column=1, sticky="w", pady=(0, 8))
-        ttk.Checkbutton(frame, text="Enabled", variable=self.enabled).grid(row=12, column=1, sticky="w", pady=8)
-        buttons = ttk.Frame(frame); buttons.grid(row=13, column=0, columnspan=2, sticky="e", pady=(18, 0))
+        ttk.Label(frame, text=password_note, foreground="#555").grid(row=13, column=1, sticky="w", pady=(0, 8))
+        ttk.Checkbutton(frame, text="Enabled", variable=self.enabled).grid(row=14, column=1, sticky="w", pady=8)
+        buttons = ttk.Frame(frame); buttons.grid(row=15, column=0, columnspan=2, sticky="e", pady=(18, 0))
         ttk.Button(buttons, text="Save", command=self.save).pack(side="left", padx=5); ttk.Button(buttons, text="Cancel", command=self.window.destroy).pack(side="left", padx=5)
         self.apply_provider_state(reset_defaults=False)
         self.window.wait_window()
@@ -854,6 +1455,7 @@ class MailAccountEditor:
         self.imap_host_entry.configure(state="disabled" if gmail else "normal")
         self.imap_port_entry.configure(state="disabled" if gmail else "normal")
         self.imap_encryption_box.configure(state="disabled" if gmail else "readonly")
+        self.sender_alias_entry.configure(state="normal" if gmail else "disabled")
     def save(self):
         try:
             provider = self.provider.get()
@@ -868,7 +1470,7 @@ class MailAccountEditor:
             if not imap_host: raise ValueError("IMAP Host cannot be empty.")
             if not str(imap_port).isdigit(): raise ValueError("IMAP Port must be numeric.")
             if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", self.email.get().strip()): raise ValueError("A valid email address is required.")
-            self.result = {"name": self.display_name.get().strip(), "email": self.email.get().strip(), "password": self.password.get(), "enabled": self.enabled.get(), "provider": provider, "smtp_host": host, "smtp_port": port, "encryption": encryption, "imap_host": imap_host, "imap_port": imap_port, "imap_encryption": imap_encryption}
+            self.result = {"name": self.display_name.get().strip(), "email": self.email.get().strip(), "sender_alias": self.sender_alias.get().strip() if provider == "Gmail" else "", "password": self.password.get(), "enabled": self.enabled.get(), "provider": provider, "smtp_host": host, "smtp_port": port, "encryption": encryption, "imap_host": imap_host, "imap_port": imap_port, "imap_encryption": imap_encryption}
             self.window.destroy()
         except ValueError as exc: messagebox.showerror(APP_NAME, str(exc), parent=self.window)
 
@@ -945,7 +1547,7 @@ def sync_schedule_task(item):
         run_cmd(["schtasks", "/Delete", "/TN", name, "/F"]); return
     days = ",".join(day[:3].upper() for day in item["days"])
     if not days: raise ValueError("Select at least one day.")
-    exe = install_dir() / "Email Automation.exe"
+    exe = Path(sys.executable).resolve() if getattr(sys, "frozen", False) else Path(__file__).resolve()
     action = f'"{exe}" --run-schedule {item["id"]}'
     result = run_cmd(["schtasks", "/Create", "/TN", name, "/TR", action, "/SC", "WEEKLY", "/D", days, "/ST", item["time"], "/F", "/RL", "LIMITED"])
     if result.returncode != 0: raise RuntimeError((result.stderr or result.stdout).strip())
@@ -961,7 +1563,7 @@ class ScheduleEditor:
         self.result = None
         self.window = tk.Toplevel(parent)
         self.window.title("Edit Schedule" if current else "Add Schedule")
-        self.window.geometry("620x680")
+        self.window.geometry("820x760")
         self.window.resizable(False, False)
         self.window.transient(parent)
         self.window.grab_set()
@@ -988,7 +1590,12 @@ class ScheduleEditor:
             self.day_vars[day] = variable
             ttk.Checkbutton(day_frame, text=day, variable=variable).grid(row=index // 2, column=index % 2, sticky="w", padx=(0, 36), pady=4)
         attachment_host = ttk.Frame(frame); attachment_host.grid(row=4, column=0, columnspan=3, sticky="ew")
-        self.attachment_selector = AttachmentMultiSelect(attachment_host, self.current.get("attachment_ids", []))
+        self.attachment_selector = AttachmentMultiSelect(
+            attachment_host,
+            self.current.get("attachment_ids", []),
+            self.current.get("attachment_source", "Attachment Library"),
+            self.current.get("local_attachment_paths", []),
+        )
         ttk.Label(frame, text="Time (HH:mm):").grid(row=5, column=0, sticky="w", pady=7)
         ttk.Entry(frame, textvariable=self.when, width=16).grid(row=5, column=1, sticky="w", pady=7)
         ttk.Label(frame, text="Maximum Emails:").grid(row=6, column=0, sticky="w", pady=7)
@@ -1028,7 +1635,9 @@ class ScheduleEditor:
                 "days": selected_days,
                 "time": self.when.get().strip(),
                 "max_emails": maximum,
+                "attachment_source": self.attachment_selector.selected_source(),
                 "attachment_ids": self.attachment_selector.selected_ids(),
+                "local_attachment_paths": self.attachment_selector.selected_local_paths(),
                 "enabled": self.enabled.get(),
             }
             self.window.destroy()
@@ -1040,12 +1649,26 @@ class MultiScheduleWindow:
     DAYS = ScheduleEditor.DAYS
     def __init__(self, parent=None):
         self.root = tk.Toplevel(parent) if parent else tk.Tk(); self.root.title("Daily Scheduling"); self.root.geometry("900x480")
+        self.page = 1
+        self.total_pages = 1
+        self.page_size = tk.IntVar(value=PAGE_SIZE)
+        self.sort_key = ""
+        self.sort_reverse = False
         frame = ttk.Frame(self.root, padding=16); frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="Recurring Email Schedules", font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(0, 12))
         self.tree = ttk.Treeview(frame, columns=("name", "file", "days", "time", "maximum", "status"), show="headings")
         for key, title, width in (("name", "Schedule Name", 140), ("file", "Excel File", 220), ("days", "Days", 190), ("time", "Time", 70), ("maximum", "Maximum", 70), ("status", "Status", 80)):
-            self.tree.heading(key, text=title); self.tree.column(key, width=width)
+            self.tree.heading(key, text=title, command=lambda value=key:self.sort_by(value)); self.tree.column(key, width=width)
         self.tree.pack(fill="both", expand=True)
+        paging=ttk.Frame(frame);paging.pack(fill="x",pady=(10,0))
+        self.first_button=ttk.Button(paging,text="First",command=lambda:self.goto_page(1));self.first_button.pack(side="left")
+        self.previous_button=ttk.Button(paging,text="Previous",command=lambda:self.goto_page(self.page-1));self.previous_button.pack(side="left",padx=(6,0))
+        self.page_label=tk.StringVar(value="Page 1 of 1");ttk.Label(paging,textvariable=self.page_label).pack(side="left",padx=12)
+        self.next_button=ttk.Button(paging,text="Next",command=lambda:self.goto_page(self.page+1));self.next_button.pack(side="left")
+        self.last_button=ttk.Button(paging,text="Last",command=lambda:self.goto_page(self.total_pages));self.last_button.pack(side="left",padx=(6,18))
+        ttk.Label(paging,text="Page Size:").pack(side="left")
+        page_size_box=ttk.Combobox(paging,textvariable=self.page_size,values=(10,20,50,100),state="readonly",width=6)
+        page_size_box.pack(side="left",padx=(6,0));page_size_box.bind("<<ComboboxSelected>>",lambda _event:self.change_page_size())
         bar=ttk.Frame(frame);bar.pack(fill="x",pady=12)
         for text,cmd in (("Add",self.add),("Edit",self.edit),("Delete",self.delete),("Enable",lambda:self.toggle(True)),("Disable",lambda:self.toggle(False)),("Duplicate",self.duplicate)):
             ttk.Button(bar,text=text,command=cmd).pack(side="left",padx=(0,7))
@@ -1053,9 +1676,44 @@ class MultiScheduleWindow:
     def items(self): return load_schedules()
     def selected_id(self):
         values=self.tree.selection(); return self.tree.item(values[0],"tags")[0] if values else None
+    def display_values(self,item):
+        return (item["name"],item["excel_file"],", ".join(item["days"]),item["time"],item["max_emails"],"Enabled" if item.get("enabled",True) else "Disabled")
+    def sorted_items(self):
+        values=list(self.items())
+        indexes={"name":0,"file":1,"days":2,"time":3,"maximum":4,"status":5}
+        if self.sort_key in indexes:
+            index=indexes[self.sort_key]
+            values.sort(key=lambda item: sortable_text(self.display_values(item)[index]),reverse=self.sort_reverse)
+        return values
+    def sort_by(self,key):
+        if self.sort_key==key:self.sort_reverse=not self.sort_reverse
+        else:self.sort_key=key;self.sort_reverse=False
+        self.page=1;self.refresh()
+    def change_page_size(self):
+        try:self.page_size.set(max(1,int(self.page_size.get())))
+        except Exception:self.page_size.set(PAGE_SIZE)
+        self.page=1;self.refresh()
+    def goto_page(self,page):
+        try:self.page=int(page)
+        except Exception:self.page=1
+        self.refresh()
+    def update_paging_controls(self,total_items):
+        size=max(1,int(self.page_size.get() or PAGE_SIZE))
+        self.page,self.total_pages,start,end=page_bounds(total_items,self.page,size)
+        self.page_label.set(f"Page {self.page} of {self.total_pages}")
+        first_state="disabled" if self.page<=1 else "normal"
+        last_state="disabled" if self.page>=self.total_pages else "normal"
+        self.first_button.configure(state=first_state);self.previous_button.configure(state=first_state)
+        self.next_button.configure(state=last_state);self.last_button.configure(state=last_state)
+        return start,end
     def refresh(self):
+        selected=self.selected_id()
+        values=self.sorted_items()
+        start,end=self.update_paging_controls(len(values))
         for row in self.tree.get_children(): self.tree.delete(row)
-        for item in self.items(): self.tree.insert("","end",values=(item["name"],item["excel_file"],", ".join(item["days"]),item["time"],item["max_emails"],"Enabled" if item.get("enabled",True) else "Disabled"),tags=(item["id"],))
+        for item in values[start:end]:
+            row=self.tree.insert("","end",values=self.display_values(item),tags=(item["id"],))
+            if selected and item["id"]==selected:self.tree.selection_set(row)
     def form(self, item=None):
         return ScheduleEditor(self.root, item).result
     def add(self):
@@ -1089,20 +1747,20 @@ class GlobalSettingsWindow:
     def __init__(self, parent):
         self.root=tk.Toplevel(parent);self.root.title("Settings");self.root.geometry("520x470");self.cfg=load_config();frame=ttk.Frame(self.root,padding=18);frame.pack(fill="both",expand=True)
         ttk.Label(frame,text="Global Settings",font=("Segoe UI",16,"bold")).grid(row=0,column=0,columnspan=2,sticky="w",pady=(0,15))
-        fields=(("random_delay_min","Minimum Delay Seconds"),("random_delay_max","Maximum Delay Seconds"),("retry_count","Retry Count"),("log_retention_days","Log Retention Days"),("default_sender_name","Default Sender Name"))
+        fields=(("random_delay_min","Minimum Delay Seconds"),("random_delay_max","Maximum Delay Seconds"),("retry_count","Retry Count"),("default_sender_name","Default Sender Name"))
         self.vars={}
         for row,(key,label) in enumerate(fields,1):
             ttk.Label(frame,text=label+":").grid(row=row,column=0,sticky="w",pady=6);self.vars[key]=tk.StringVar(value=str(self.cfg.get(key,"")));ttk.Entry(frame,textvariable=self.vars[key],width=28).grid(row=row,column=1,sticky="w")
-        self.backup=tk.BooleanVar(value=self.cfg.get("backup_enabled",True));ttk.Checkbutton(frame,text="Backup Enabled",variable=self.backup).grid(row=6,column=0,columnspan=2,sticky="w",pady=8)
-        ttk.Label(frame,text="Default Theme:").grid(row=7,column=0,sticky="w");self.theme=tk.StringVar(value=self.cfg.get("theme","Light"));ttk.Combobox(frame,textvariable=self.theme,values=("Light","Dark"),state="readonly",width=25).grid(row=7,column=1,sticky="w")
-        bar=ttk.Frame(frame);bar.grid(row=8,column=0,columnspan=2,sticky="w",pady=18)
+        self.backup=tk.BooleanVar(value=self.cfg.get("backup_enabled",True));ttk.Checkbutton(frame,text="Backup Enabled",variable=self.backup).grid(row=5,column=0,columnspan=2,sticky="w",pady=8)
+        ttk.Label(frame,text="Default Theme:").grid(row=6,column=0,sticky="w");self.theme=tk.StringVar(value=self.cfg.get("theme","Light"));ttk.Combobox(frame,textvariable=self.theme,values=("Light","Dark"),state="readonly",width=25).grid(row=6,column=1,sticky="w")
+        bar=ttk.Frame(frame);bar.grid(row=7,column=0,columnspan=2,sticky="w",pady=18)
         ttk.Button(bar,text="Save",command=self.save).pack(side="left",padx=(0,7))
-        for text,key in (("Open Backup Folder","backup"),("Open Reports Folder","reports"),("Open Logs Folder","logs")):
+        for text,key in (("Open Backup Folder","backup"),):
             ttk.Button(bar,text=text,command=lambda k=key:os.startfile(app_paths()[k])).pack(side="left",padx=(0,7))
-        ttk.Button(frame,text="Check for Updates (Future)",command=lambda:messagebox.showinfo(APP_NAME,"Update service is future-ready.",parent=self.root)).grid(row=9,column=0,columnspan=2,sticky="w")
+        ttk.Button(frame,text="Check for Updates (Future)",command=lambda:messagebox.showinfo(APP_NAME,"Update service is future-ready.",parent=self.root)).grid(row=8,column=0,columnspan=2,sticky="w")
     def save(self):
         try:
-            for key in ("random_delay_min","random_delay_max","retry_count","log_retention_days"):self.cfg[key]=int(self.vars[key].get())
+            for key in ("random_delay_min","random_delay_max","retry_count"):self.cfg[key]=int(self.vars[key].get())
             self.cfg["default_sender_name"]=self.vars["default_sender_name"].get().strip();self.cfg["backup_enabled"]=self.backup.get();self.cfg["theme"]=self.theme.get();save_config(self.cfg);messagebox.showinfo(APP_NAME,"Settings saved.",parent=self.root)
         except Exception as exc:messagebox.showerror(APP_NAME,str(exc),parent=self.root)
 
@@ -1193,70 +1851,17 @@ class AttachmentLibraryWindow:
         self.set_busy(False); self.progress.configure(value=0); self.status.set(f"{operation} failed: {error}"); messagebox.showerror(APP_NAME, f"The attachment server is unavailable or returned an error.\n\n{error}", parent=self.root)
 
 
-class LogWindow:
-    def __init__(self,parent):
-        self.root=tk.Toplevel(parent);self.root.title("Logs");self.root.geometry("1050x560");frame=ttk.Frame(self.root,padding=14);frame.pack(fill="both",expand=True)
-        top=ttk.Frame(frame);top.pack(fill="x");self.search=tk.StringVar();ttk.Entry(top,textvariable=self.search,width=40).pack(side="left");ttk.Button(top,text="Search / Refresh",command=self.refresh).pack(side="left",padx=7);ttk.Button(top,text="Export CSV",command=self.export).pack(side="left");ttk.Button(top,text="Open Log Folder",command=lambda:os.startfile(app_paths()["logs"])).pack(side="right")
-        cols=("date","time","tracking","sender","recipient","subject","status","response","error","duration");self.tree=ttk.Treeview(frame,columns=cols,show="headings")
-        for key,title,width in zip(cols,("Date","Time","TrackingId","Sender Email","Recipient Email","Subject","Status","SMTP Response","Error","Seconds"),(85,75,230,170,170,190,75,100,220,70)):
-            self.tree.heading(key,text=title);self.tree.column(key,width=width)
-        self.tree.pack(fill="both",expand=True,pady=10);self.refresh()
-    def rows(self):
-        result=[]
-        for path in sorted(app_paths()["logs"].glob("*.log")):
-            with path.open(encoding="utf-8",errors="replace",newline="") as f:
-                for row in list(csv.reader(f))[1:]:
-                    if len(row)>=10: result.append(row[:10])
-                    elif len(row)>=9: result.append(row[:2] + [""] + row[2:9])
-        return result
-    def refresh(self):
-        query=self.search.get().lower()
-        for item in self.tree.get_children():self.tree.delete(item)
-        for row in self.rows():
-            if not query or query in " ".join(row).lower():self.tree.insert("","end",values=row)
-    def export(self):
-        path=filedialog.asksaveasfilename(parent=self.root,defaultextension=".csv",filetypes=[("CSV","*.csv")])
-        if path:
-            with open(path,"w",encoding="utf-8",newline="") as f:csv.writer(f).writerows([[self.tree.heading(c,"text") for c in self.tree["columns"]]]+[list(self.tree.item(i,"values")) for i in self.tree.get_children()])
-
-
-class ReportsWindow:
-    def __init__(self,parent):
-        self.root=tk.Toplevel(parent);self.root.title("Reports");self.root.geometry("900x540");frame=ttk.Frame(self.root,padding=14);frame.pack(fill="both",expand=True)
-        top=ttk.Frame(frame);top.pack(fill="x");self.status=tk.StringVar(value="All");ttk.Label(top,text="Status:").pack(side="left");ttk.Combobox(top,textvariable=self.status,values=("All","Pending","Sent","Failed"),state="readonly",width=12).pack(side="left",padx=7);ttk.Button(top,text="Refresh",command=self.refresh).pack(side="left");ttk.Button(top,text="Export CSV",command=self.export_csv).pack(side="right");ttk.Button(top,text="Export Excel",command=self.export_excel).pack(side="right",padx=7);ttk.Button(top,text="Export PDF",command=self.export_pdf).pack(side="right")
-        self.tree=ttk.Treeview(frame,columns=("name","email","company","sender","status","date","result"),show="headings")
-        for key,title,width in (("name","Name",130),("email","Email",190),("company","Company",130),("sender","Sender Email",180),("status","Status",75),("date","Sent Date",130),("result","Result",180)):
-            self.tree.heading(key,text=title);self.tree.column(key,width=width)
-        self.tree.pack(fill="both",expand=True,pady=10);self.refresh()
-    def data(self):
-        p=app_paths()["list"];wb=load_workbook(p,read_only=True,data_only=True);ws=wb.active;h=header_map(ws);rows=[]
-        for r in range(2,ws.max_row+1):
-            get=lambda k:str(ws.cell(r,h[k]).value or "") if k in h else "";status=get("status")
-            if self.status.get()!="All" and status.lower()!=self.status.get().lower():continue
-            rows.append((f"{get('first_name')} {get('last_name')}".strip(),get("email"),get("company"),get("sender_email") or get("sender_mail"),status,get("sentdate"),get("result")))
-        wb.close();return rows
-    def refresh(self):
-        for i in self.tree.get_children():self.tree.delete(i)
-        for row in self.data():self.tree.insert("","end",values=row)
-    def export_csv(self):
-        p=filedialog.asksaveasfilename(parent=self.root,defaultextension=".csv",filetypes=[("CSV","*.csv")]);
-        if p:
-            with open(p,"w",encoding="utf-8",newline="") as f:csv.writer(f).writerows([[self.tree.heading(c,"text") for c in self.tree["columns"]]]+self.data())
-    def export_excel(self):
-        p=filedialog.asksaveasfilename(parent=self.root,defaultextension=".xlsx",filetypes=[("Excel","*.xlsx")]);
-        if p:
-            wb=Workbook();ws=wb.active;ws.append([self.tree.heading(c,"text") for c in self.tree["columns"]]);[ws.append(row) for row in self.data()];wb.save(p)
-    def export_pdf(self):
-        p=filedialog.asksaveasfilename(parent=self.root,defaultextension=".pdf",filetypes=[("PDF","*.pdf")]);
-        if p: write_simple_pdf(p,[" | ".join(map(str,row)) for row in self.data()]);messagebox.showinfo(APP_NAME,"PDF exported.",parent=self.root)
-
-
-def write_simple_pdf(path,lines):
-    safe=lambda s:str(s).replace("\\","\\\\").replace("(","\\(").replace(")","\\)").encode("latin-1","replace").decode("latin-1")
-    content="BT /F1 8 Tf 35 800 Td "+" ".join(f"({safe(line[:150])}) Tj 0 -12 Td" for line in (["Email Automation Report"]+lines[:60]))+" ET";objects=["1 0 obj<< /Type /Catalog /Pages 2 0 R >>endobj","2 0 obj<< /Type /Pages /Kids [3 0 R] /Count 1 >>endobj","3 0 obj<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>endobj","4 0 obj<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>endobj",f"5 0 obj<< /Length {len(content.encode('latin-1'))} >>stream\n{content}\nendstream endobj"]
-    data=b"%PDF-1.4\n";offsets=[0]
-    for obj in objects:offsets.append(len(data));data+=obj.encode("latin-1")+b"\n"
-    xref=len(data);data+=f"xref\n0 {len(objects)+1}\n0000000000 65535 f \n".encode();data+=b"".join(f"{o:010d} 00000 n \n".encode() for o in offsets[1:]);data+=f"trailer<< /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode();Path(path).write_bytes(data)
+class DatabaseReportsWindow:
+    def __init__(self, parent):
+        self.root = tk.Toplevel(parent)
+        self.root.title("Reports (Database)")
+        self.root.geometry("520x220")
+        self.root.resizable(False, False)
+        frame = ttk.Frame(self.root, padding=24)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Reports (Database)", font=("Segoe UI", 17, "bold")).pack(anchor="w", pady=(0, 18))
+        ttk.Label(frame, text="Database reporting will be available in a future version.", wraplength=440).pack(anchor="w")
+        ttk.Button(frame, text="Close", command=self.root.destroy).pack(anchor="e", pady=(28, 0))
 
 
 class TrackingSynchronizationWindow:
@@ -1312,7 +1917,7 @@ class TrackingSynchronizationWindow:
         def worker():
             try:
                 debug_mode = self.cfg.get("FullSynchronizationDebug", True)
-                result = tracking_sync_service().sync(self.cfg.get("tracking_last_sync_time", ""), debug_mode)
+                result = synchronize_with_bounce(self.cfg.get("tracking_last_sync_time", ""), debug_mode)
                 if not debug_mode:
                     self.cfg["tracking_last_sync_time"] = result["last_sync_time"]
                 save_config(self.cfg)
@@ -1327,6 +1932,9 @@ class TrackingSynchronizationWindow:
         text = ("Synchronization Complete\n\n"
                 f"Records Downloaded: {result['records_downloaded']}\n"
                 f"Rows Updated: {result['rows_updated']}\n"
+                f"Bounces Detected: {result.get('bounce_detected', 0)}\n"
+                f"Bounces Registered: {result.get('bounce_registered', 0)}\n"
+                f"Bounce Rows Updated: {result.get('bounce_rows_updated', 0)}\n"
                 f"Execution Time: {result['execution_time']:.2f} seconds\n"
                 f"Last Synchronization Time: {result['last_sync_time']}")
         self.status.set(text)
@@ -1340,94 +1948,35 @@ class TrackingSynchronizationWindow:
         messagebox.showerror(APP_NAME, f"Tracking synchronization failed:\n\n{error}", parent=self.root)
 
 
-class BounceTrackingWindow:
-    def __init__(self, parent, on_check_complete=None):
-        self.root = tk.Toplevel(parent); self.root.title("Bounce Tracking"); self.root.geometry("760x520")
-        self.on_check_complete = on_check_complete
-        self.cfg = load_config(); self.accounts = account_service(); self.service = bounce_tracking_service()
-        frame = ttk.Frame(self.root, padding=18); frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="Bounce Mail Tracking", font=("Segoe UI", 17, "bold")).pack(anchor="w", pady=(0, 14))
-        self.tree = ttk.Treeview(frame, columns=("provider", "name", "email", "status"), show="headings", height=9)
-        for key, title, width in (("provider", "Provider", 110), ("name", "Display Name", 180), ("email", "Email Address", 300), ("status", "Status", 90)):
-            self.tree.heading(key, text=title); self.tree.column(key, width=width)
-        self.tree.pack(fill="both", expand=True)
-        for account in self.accounts.list_accounts(): self.tree.insert("", "end", values=(account["provider"], account["display_name"], account["email"], "Enabled" if account.get("enabled", True) else "Disabled"))
-        options = ttk.LabelFrame(frame, text="Automatic Bounce Check Scheduler", padding=12); options.pack(fill="x", pady=12)
-        self.enabled = tk.BooleanVar(value=self.cfg.get("bounce_check_enabled", False)); ttk.Checkbutton(options, text="Enable Automatic Bounce Check", variable=self.enabled).pack(side="left")
-        ttk.Label(options, text="Every").pack(side="left", padx=(30, 6)); self.interval = tk.StringVar(value=str(self.cfg.get("bounce_check_interval_minutes", 30))); ttk.Spinbox(options, from_=1, to=1440, textvariable=self.interval, width=8).pack(side="left"); ttk.Label(options, text="minutes").pack(side="left", padx=6)
-        self.status = tk.StringVar(value="Ready"); ttk.Label(frame, textvariable=self.status).pack(anchor="w", pady=6)
-        bar = ttk.Frame(frame); bar.pack(fill="x", pady=8)
-        self.check_button = ttk.Button(bar, text="Check Bounce Now", command=self.check_now); self.check_button.pack(side="left", padx=(0, 7))
-        ttk.Button(bar, text="Test IMAP Connection", command=self.test_imap).pack(side="left", padx=7)
-        ttk.Button(bar, text="Save Scheduler", command=self.save_scheduler).pack(side="left", padx=7)
-        ttk.Button(bar, text="Close", command=self.root.destroy).pack(side="right")
-    def selected_email(self):
-        selected = self.tree.selection(); return self.tree.item(selected[0], "values")[2] if selected else None
-    def save_scheduler(self, show_message=True):
-        try:
-            interval = int(self.interval.get())
-            if interval < 1: raise ValueError("Interval must be at least 1 minute.")
-            self.cfg["bounce_check_enabled"] = self.enabled.get(); self.cfg["bounce_check_interval_minutes"] = interval; save_config(self.cfg)
-            if show_message: messagebox.showinfo(APP_NAME, "Bounce scheduler saved.", parent=self.root)
-            return True
-        except ValueError as exc: messagebox.showerror(APP_NAME, str(exc), parent=self.root); return False
-    def configurations(self):
-        return [value for account in self.accounts.list_accounts() if account.get("enabled", True) for value in [self.accounts.imap_configuration(account["email"])] if value]
-    def check_now(self):
-        if not self.save_scheduler(show_message=False): return
-        self.check_button.configure(state="disabled"); self.status.set("Checking unread bounce emails…")
-        def worker():
-            detected = matched = 0; errors = []
-            for configuration in self.configurations():
-                try:
-                    result = self.service.check_account(configuration); detected += result["detected"]; matched += result["matched"]
-                except Exception as exc: errors.append(f"{configuration['email']}: {exc}")
-            self.root.after(0, self.check_complete, detected, matched, errors)
-        threading.Thread(target=worker, daemon=True).start()
-    def check_complete(self, detected, matched, errors):
-        self.check_button.configure(state="normal"); text = f"Bounce check complete. Detected: {detected}. Excel rows updated: {matched}."
-        if errors: text += "\n\n" + "\n".join(errors)
-        self.status.set(text)
-        if self.on_check_complete: self.on_check_complete()
-        (messagebox.showwarning if errors else messagebox.showinfo)(APP_NAME, text, parent=self.root)
-    def test_imap(self):
-        email_address = self.selected_email()
-        if not email_address: messagebox.showwarning(APP_NAME, "Select a mail account first.", parent=self.root); return
-        configuration = self.accounts.imap_configuration(email_address)
-        if not configuration: messagebox.showerror(APP_NAME, "Mail account is disabled or not configured.", parent=self.root); return
-        try: self.service.test_connection(configuration); messagebox.showinfo(APP_NAME, "IMAP connection successful.", parent=self.root)
-        except Exception as exc: messagebox.showerror(APP_NAME, f"IMAP connection failed:\n\n{exc}", parent=self.root)
-
-
 class EmailAutomationApp:
     def __init__(self):
         self.root=tk.Tk();self.root.title("Email Automation");self.root.geometry("1120x680");self.root.minsize(900,580)
         sidebar=tk.Frame(self.root,bg="#16324f",width=210);sidebar.pack(side="left",fill="y");sidebar.pack_propagate(False)
         tk.Label(sidebar,text="Email Automation",bg="#16324f",fg="white",font=("Segoe UI",16,"bold"),pady=24).pack(fill="x")
-        actions=(("Dashboard",self.refresh),("Send Mail Now",lambda:SenderWindow(self.root)),("Daily Scheduling",lambda:MultiScheduleWindow(self.root)),("Mail Account Setup",lambda:AccountWindow(self.root)),("Tracking Synchronization",lambda:TrackingSynchronizationWindow(self.root,self.schedule_tracking_check,self.record_tracking_sync_run)),("Bounce Tracking",lambda:BounceTrackingWindow(self.root,self.record_bounce_check_run)),("Reports",lambda:ReportsWindow(self.root)),("Settings",lambda:SettingsWindow(self.root)),("Logs",lambda:LogWindow(self.root)),("Exit",self.root.destroy))
+        actions=(("Dashboard",self.refresh),("Send Mail Now",lambda:SenderWindow(self.root)),("Daily Scheduling",lambda:MultiScheduleWindow(self.root)),("Mail Account Setup",lambda:AccountWindow(self.root)),("Tracking Synchronization",lambda:TrackingSynchronizationWindow(self.root,self.schedule_tracking_check,self.record_tracking_sync_run)),("Reports (Database)",lambda:DatabaseReportsWindow(self.root)),("Settings",lambda:SettingsWindow(self.root)),("Exit",self.root.destroy))
         for text,cmd in actions:tk.Button(sidebar,text=text,command=cmd,bg="#16324f",fg="white",activebackground="#285b87",activeforeground="white",relief="flat",anchor="w",padx=22,pady=11,font=("Segoe UI",10)).pack(fill="x")
         tk.Label(sidebar,text=f"Build:\n{BUILD_TIMESTAMP_UTC} UTC",bg="#16324f",fg="#b9cfe3",font=("Segoe UI",8),justify="left",padx=22,pady=12).pack(side="bottom",fill="x",anchor="w")
-        self.main=ttk.Frame(self.root,padding=22);self.main.pack(side="left",fill="both",expand=True);self.sync_running=False;self.tracking_check_job=None;self.tracking_debug_last_run="";self.bounce_check_running=False;self.bounce_last_run=0.0;self.refresh();self.tracking_check_job=self.root.after(1500,self.check_tracking_synchronization);self.root.after(2500,self.check_automatic_bounces)
+        self.main=ttk.Frame(self.root,padding=22);self.main.pack(side="left",fill="both",expand=True);self.sync_running=False;self.tracking_check_job=None;self.tracking_debug_last_run="";self.reply_check_running=False;self.reply_last_run=0.0;self.dashboard_page=1;self.dashboard_sort_key="sender";self.dashboard_sort_reverse=False;self.dashboard_search=tk.StringVar();self.refresh();self.tracking_check_job=self.root.after(1500,self.check_tracking_synchronization);self.root.after(5000,self.check_automatic_replies)
 
-    def record_bounce_check_run(self): self.bounce_last_run = time.monotonic()
+    def record_reply_check_run(self): self.reply_last_run = time.monotonic()
 
-    def check_automatic_bounces(self):
-        cfg = load_config(); interval = max(1, int(cfg.get("bounce_check_interval_minutes", 30))) * 60
-        due = not self.bounce_last_run or time.monotonic() - self.bounce_last_run >= interval
-        if cfg.get("bounce_check_enabled", False) and due and not self.bounce_check_running:
-            self.bounce_check_running = True
+    def check_automatic_replies(self):
+        interval = 5 * 60
+        due = not self.reply_last_run or time.monotonic() - self.reply_last_run >= interval
+        if due and not self.reply_check_running:
+            self.reply_check_running = True
             def worker():
                 try:
-                    accounts = account_service(); service = bounce_tracking_service()
+                    accounts = account_service(); service = reply_tracking_service()
                     for account in accounts.list_accounts():
                         configuration = accounts.imap_configuration(account["email"]) if account.get("enabled", True) else None
                         if configuration:
                             try: service.check_account(configuration)
                             except Exception: pass
                 finally:
-                    self.record_bounce_check_run(); self.bounce_check_running = False
+                    self.record_reply_check_run(); self.reply_check_running = False
             threading.Thread(target=worker, daemon=True).start()
-        self.root.after(60000, self.check_automatic_bounces)
+        self.root.after(60000, self.check_automatic_replies)
 
     def record_tracking_sync_run(self):
         self.tracking_debug_last_run = datetime.now(timezone.utc).isoformat()
@@ -1448,7 +1997,7 @@ class EmailAutomationApp:
             def worker():
                 try:
                     current = load_config(); debug_mode = current.get("FullSynchronizationDebug", True)
-                    result = tracking_sync_service().sync(last_sync, debug_mode)
+                    result = synchronize_with_bounce(last_sync, debug_mode)
                     if not debug_mode:
                         updated = load_config(); updated["tracking_last_sync_time"] = result["last_sync_time"]; save_config(updated)
                     else:
@@ -1459,30 +2008,33 @@ class EmailAutomationApp:
                     self.sync_running = False
             threading.Thread(target=worker, daemon=True).start()
         self.tracking_check_job = self.root.after(60000, self.check_tracking_synchronization)
+    def dashboard_sort_by(self,key):
+        if self.dashboard_sort_key==key:self.dashboard_sort_reverse=not self.dashboard_sort_reverse
+        else:self.dashboard_sort_key=key;self.dashboard_sort_reverse=False
+        self.dashboard_page=1;self.refresh()
+    def dashboard_goto_page(self,page):
+        try:self.dashboard_page=int(page)
+        except Exception:self.dashboard_page=1
+        self.refresh()
+    def dashboard_clear_search(self):
+        self.dashboard_search.set("");self.dashboard_page=1;self.refresh()
     def refresh(self):
         for child in self.main.winfo_children():child.destroy()
         ttk.Label(self.main,text="Dashboard",font=("Segoe UI",20,"bold")).pack(anchor="w")
-        accounts=account_service().list_accounts();rows,counts=email_grid_data();enabled=sum(1 for a in accounts if a.get("enabled",True));today_sent=today_failed=weekly_sent=monthly_sent=0;per={}
-        p=app_paths()["list"]
-        if p.exists():
-            wb=load_workbook(p,read_only=True,data_only=True);ws=wb.active;h=header_map(ws)
-            for r in range(2,ws.max_row+1):
-                status=str(ws.cell(r,h.get("status",0)).value or "");sender_key=h.get("sender_email") or h.get("sender_mail");sender=str(ws.cell(r,sender_key).value or "") if sender_key else "";entry=per.setdefault(sender,{"sent_today":0,"pending":0})
-                if status.lower()=="pending":entry["pending"]+=1
-                date=ws.cell(r,h.get("sentdate",0)).value if h.get("sentdate") else None
-                now=datetime.now();is_today=isinstance(date,datetime) and date.date()==now.date();is_week=isinstance(date,datetime) and 0 <= (now.date()-date.date()).days < 7;is_month=isinstance(date,datetime) and date.year==now.year and date.month==now.month
-                if status.lower()=="sent":entry["sent_today"]+=int(is_today);today_sent+=int(is_today);weekly_sent+=int(is_week);monthly_sent+=int(is_month)
-                if status.lower()=="failed" and is_today:today_failed+=1
-            wb.close()
+        accounts=account_service().list_accounts();summary=dashboard_excel_summary(page=self.dashboard_page,page_size=PAGE_SIZE,search=self.dashboard_search.get(),sort_key=self.dashboard_sort_key,sort_reverse=self.dashboard_sort_reverse);counts=summary["counts"];enabled=sum(1 for a in accounts if a.get("enabled",True));today_sent=summary["today_sent"];today_failed=summary["today_failed"];weekly_sent=summary["weekly_sent"];monthly_sent=summary["monthly_sent"]
         total_done=counts["sent"]+counts["failed"];success=(counts["sent"]/total_done*100) if total_done else 0
         metrics=(("Total Gmail Accounts",len(accounts)),("Enabled Gmail Accounts",enabled),("Disabled Gmail Accounts",len(accounts)-enabled),("Grand Total Emails",counts["total"]),("Pending Emails",counts["pending"]),("Sent Emails",counts["sent"]),("Failed Emails",counts["failed"]),("Today's Sent",today_sent),("Today's Failed",today_failed),("Weekly Sent",weekly_sent),("Monthly Sent",monthly_sent),("Success Rate",f"{success:.1f}%"),("Failure Rate",f"{100-success:.1f}%"))
         cards=ttk.Frame(self.main);cards.pack(fill="x",pady=18)
         for i,(label,value) in enumerate(metrics):
             box=ttk.LabelFrame(cards,text=label,padding=12);box.grid(row=i//4,column=i%4,sticky="nsew",padx=5,pady=5);ttk.Label(box,text=str(value),font=("Segoe UI",16,"bold")).pack();cards.columnconfigure(i%4,weight=1)
-        ttk.Label(self.main,text="Per Sender Email Statistics",font=("Segoe UI",13,"bold")).pack(anchor="w",pady=(12,5));tree=ttk.Treeview(self.main,columns=("sender","sent","pending"),show="headings",height=8)
-        for k,t in (("sender","Sender Email"),("sent","Sent Today"),("pending","Pending")):tree.heading(k,text=t)
-        for sender,value in per.items():tree.insert("","end",values=(sender,value["sent_today"],value["pending"]))
-        tree.pack(fill="both",expand=True);ttk.Button(self.main,text="Refresh",command=self.refresh).pack(anchor="e",pady=8)
+        ttk.Label(self.main,text="Per Sender Email Statistics",font=("Segoe UI",13,"bold")).pack(anchor="w",pady=(12,5))
+        bar=ttk.Frame(self.main);bar.pack(fill="x",pady=(0,6));ttk.Label(bar,text="Search:").pack(side="left");ttk.Entry(bar,textvariable=self.dashboard_search,width=30).pack(side="left",padx=7);ttk.Button(bar,text="Search",command=lambda:(setattr(self,"dashboard_page",1),self.refresh())).pack(side="left");ttk.Button(bar,text="Clear",command=self.dashboard_clear_search).pack(side="left",padx=7);ttk.Button(bar,text="Refresh",command=self.refresh).pack(side="right")
+        tree=ttk.Treeview(self.main,columns=("sender","sent","pending"),show="headings",height=8)
+        for k,t in (("sender","Sender Email"),("sent","Sent Today"),("pending","Pending")):tree.heading(k,text=t,command=lambda value=k:self.dashboard_sort_by(value))
+        for row in summary["per_rows"]:tree.insert("","end",values=row)
+        tree.pack(fill="both",expand=True)
+        paging=ttk.Frame(self.main);paging.pack(fill="x",pady=8);ttk.Button(paging,text="First",command=lambda:self.dashboard_goto_page(1)).pack(side="left");ttk.Button(paging,text="Previous",command=lambda:self.dashboard_goto_page(self.dashboard_page-1)).pack(side="left",padx=4);ttk.Label(paging,text="Page").pack(side="left",padx=(10,3));page_number=tk.StringVar(value=str(summary["per_page"]));entry=ttk.Entry(paging,textvariable=page_number,width=5);entry.pack(side="left");entry.bind("<Return>",lambda _event:self.dashboard_goto_page(page_number.get()));ttk.Label(paging,text=f"of {summary['per_total_pages']}  ({summary['per_filtered_total']} rows)").pack(side="left",padx=4);ttk.Button(paging,text="Next",command=lambda:self.dashboard_goto_page(summary["per_page"]+1)).pack(side="left",padx=(10,4));ttk.Button(paging,text="Last",command=lambda:self.dashboard_goto_page(summary["per_total_pages"])).pack(side="left")
+        self.dashboard_page=summary["per_page"]
     def run(self):self.root.mainloop()
 
 
@@ -1495,11 +2047,10 @@ def verify_app():
     shortcuts = [desktop / "Send Pending Emails Now.lnk", desktop / "Configure Daily Email Schedule.lnk", desktop / "Verify Installation.lnk"]
     checks.append(("Desktop shortcuts", all(x.exists() for x in shortcuts), str(desktop)))
     task = task_query(); checks.append(("Scheduled task", task["exists"], "Enabled" if task["enabled"] else "Disabled or missing"))
-    checks.append(("Log folder", paths["logs"].is_dir(), str(paths["logs"])))
     checks.append(("Config files", config_path().exists() and paths["env"].exists(), str(config_path())))
     text = "INSTALLATION VERIFICATION\n\n" + "\n".join(f"{'PASS' if ok else 'FAIL'}  {name}\n      {detail}" for name, ok, detail in checks)
-    ensure_dirs(); report = paths["reports"] / f"verification_{datetime.now():%Y%m%d_%H%M%S}.txt"; report.write_text(text, encoding="utf-8")
-    messagebox.showinfo("Verify Installation", text + f"\n\nReport saved to:\n{report}"); root.destroy()
+    ensure_dirs()
+    messagebox.showinfo("Verify Installation", text); root.destroy()
 
 
 def sample_workbook(path):
@@ -1517,19 +2068,21 @@ def main():
     name = Path(sys.executable if getattr(sys, "frozen", False) else sys.argv[0]).stem.lower()
     if "--run-schedule" in sys.argv:
         try:
-            schedule_id=sys.argv[sys.argv.index("--run-schedule")+1];item=next(x for x in load_schedules() if x["id"]==schedule_id and x.get("enabled",True));send_pending(int(item["max_emails"]),True,excel_path=item["excel_file"],attachment_ids=item.get("attachment_ids",[]))
-        except Exception as exc:daily_log(status="Scheduled Run Error",error=str(exc))
+            schedule_id=sys.argv[sys.argv.index("--run-schedule")+1];item=next(x for x in load_schedules() if x["id"]==schedule_id and x.get("enabled",True));send_pending(int(item["max_emails"]),True,excel_path=item["excel_file"],attachment_ids=item.get("attachment_ids",[]),attachment_source=item.get("attachment_source","Attachment Library"),local_attachment_paths=item.get("local_attachment_paths",[]))
+        except Exception: pass
         return
     if name == "email automation" or name == "emailautomation":
-        migrate_legacy_account();startup_log();EmailAutomationApp().run();return
+        migrate_legacy_account();EmailAutomationApp().run();return
     if "setup" in name: setup_app()
     elif "configure" in name: ScheduleWindow().run()
     elif "verify" in name: verify_app()
     elif "--scheduled" in sys.argv:
         try: send_pending(int(load_config()["daily_limit"]), True)
-        except Exception as exc: daily_log(status="Scheduled Run Error", error=str(exc))
+        except Exception: pass
     else: manual_send()
 
 
 if __name__ == "__main__":
     main()
+
+

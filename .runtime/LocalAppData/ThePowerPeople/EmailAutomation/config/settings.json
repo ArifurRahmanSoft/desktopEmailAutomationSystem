@@ -1,0 +1,17 @@
+{
+  "daily_limit": 5,
+  "schedule_time": "09:00",
+  "data_dir": "F:\\CODEX\\Email_automation",
+  "default_sender_name": "The Power People",
+  "random_delay_min": 5,
+  "random_delay_max": 15,
+  "retry_count": 1,
+  "backup_enabled": true,
+  "theme": "Light",
+  "tracking_sync_enabled": false,
+  "tracking_sync_interval_hours": 5,
+  "tracking_last_sync_time": "",
+  "FullSynchronizationDebug": true,
+  "bounce_check_enabled": false,
+  "bounce_check_interval_minutes": 30
+}

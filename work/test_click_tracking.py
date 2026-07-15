@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import unittest
 from pathlib import Path
 
@@ -12,7 +12,7 @@ class ClickTrackingTests(unittest.TestCase):
 
     def test_rewrites_url_and_preserves_visible_text(self):
         result = build_click_tracked_html("Visit https://powersoft.com today", self.tracking_id)
-        expected_href = f"https://emailtrackingserver.onrender.com/email/click/{self.tracking_id}?url=https%3A%2F%2Fpowersoft.com"
+        expected_href = f"https://emailtrackingserver-v2-2.onrender.com/email/click/{self.tracking_id}?url=https%3A%2F%2Fpowersoft.com"
         self.assertIn(f'href="{expected_href}"', result)
         self.assertIn(">https://powersoft.com</a>", result)
         self.assertTrue(result.startswith("Visit "))
@@ -39,3 +39,4 @@ class ClickTrackingTests(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+

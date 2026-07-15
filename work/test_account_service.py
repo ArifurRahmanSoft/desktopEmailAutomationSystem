@@ -42,6 +42,29 @@ class AccountServiceTests(unittest.TestCase):
             self.assertEqual(account["encryption"], "STARTTLS")
             self.assertEqual((account["imap_host"], account["imap_port"], account["imap_encryption"]), ("imap.gmail.com", 993, "SSL/TLS"))
             self.assertEqual(account["display_name"], "Legacy")
+            self.assertEqual(account["sender_alias"], "")
+
+    def test_gmail_alias_is_stored_and_used_only_as_visible_sender(self):
+        with tempfile.TemporaryDirectory() as temp:
+            credentials = FakeCredentials(); service = AccountService(Path(temp) / "accounts.json", credentials)
+            service.save_account("Sales", "login@gmail.com", "app password", sender_alias="Alias@Example.com")
+            configuration = service.smtp_configuration("login@gmail.com")
+            self.assertEqual(configuration["email"], "login@gmail.com")
+            self.assertEqual(configuration["sender_alias"], "alias@example.com")
+            self.assertEqual(AccountService.sender_address(configuration), "alias@example.com")
+            self.assertEqual(service.smtp_credentials("login@gmail.com"), ("login@gmail.com", "apppassword"))
+
+    def test_blank_or_non_gmail_alias_keeps_configured_email(self):
+        gmail = {"provider":"Gmail","smtp_host":"smtp.gmail.com","email":"login@gmail.com","sender_alias":""}
+        custom = {"provider":"Custom SMTP","smtp_host":"mail.example.com","email":"login@example.com","sender_alias":"alias@example.com"}
+        self.assertEqual(AccountService.sender_address(gmail), "login@gmail.com")
+        self.assertEqual(AccountService.sender_address(custom), "login@example.com")
+
+    def test_invalid_gmail_alias_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service = AccountService(Path(temp) / "accounts.json", FakeCredentials())
+            with self.assertRaisesRegex(ValueError, "Sender Alias"):
+                service.save_account("X", "login@gmail.com", "password", sender_alias="not-an-email")
 
     def test_custom_smtp_fields_are_stored_and_password_spaces_preserved(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -73,6 +96,8 @@ class AccountServiceTests(unittest.TestCase):
             self.assertNotIn(("starttls",), plain.calls)
             ssl = AccountService.connect_smtp({**base,"encryption":"SSL/TLS"})
             self.assertNotIn(("starttls",), ssl.calls)
+            gmail_alias = AccountService.connect_smtp({**base,"provider":"Gmail","smtp_host":"smtp.gmail.com","sender_alias":"alias@example.com","encryption":"STARTTLS"})
+            self.assertIn(("login","user@example.com","secret"), gmail_alias.calls)
 
 
 if __name__ == "__main__": unittest.main()

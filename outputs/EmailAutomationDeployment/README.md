@@ -32,9 +32,9 @@ All current and future columns are detected automatically. Adding columns such a
 
 ## Unified application
 
-The single **Email Automation** application provides Dashboard, Send Mail Now, Daily Scheduling, Mail Account Setup, Reports, Settings, Logs, and Exit. Unlimited weekly schedules are stored independently and configured to run missed starts as soon as Windows permits.
+The single **Email Automation** application provides Dashboard, Send Mail Now, Daily Scheduling, Mail Account Setup, Tracking Synchronization with integrated bounce detection, Reports (Database), Settings, and Exit. Unlimited weekly schedules are stored independently and configured to run missed starts as soon as Windows permits.
 
-Application data, logs, backups, reports, credentials, and configuration are installed under `%LOCALAPPDATA%\ThePowerPeople\EmailAutomation`.
+Version 2 no longer uses local log or report viewers. Database-driven reporting will be available in a future version. Application data, backups, credentials, and configuration are installed under the configured Version 2 runtime location.
 
 ## Scheduling note
 

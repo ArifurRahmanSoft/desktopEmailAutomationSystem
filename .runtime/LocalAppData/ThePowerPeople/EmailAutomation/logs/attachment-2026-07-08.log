@@ -1,0 +1,8 @@
+{"timestamp": "2026-07-08T13:37:23.236424", "event": "Server Error", "operation": "GET", "url": "https://emailtrackingserver.onrender.com/api/attachments/list", "error": "HTTP Error 500: Internal Server Error"}
+{"timestamp": "2026-07-08T13:50:53.333937", "event": "Refresh", "attachment_count": 2, "status": "Success"}
+{"timestamp": "2026-07-08T13:50:56.408988", "event": "Refresh", "attachment_count": 2, "status": "Success"}
+{"timestamp": "2026-07-08T13:52:18.483828", "event": "Refresh", "attachment_count": 2, "status": "Success"}
+{"timestamp": "2026-07-08T13:56:55.810706", "event": "Refresh", "attachment_count": 2, "status": "Success"}
+{"timestamp": "2026-07-08T13:58:17.777809", "event": "Refresh", "attachment_count": 2, "status": "Success"}
+{"timestamp": "2026-07-08T14:04:00.072614", "event": "Server Error", "operation": "GET", "url": "https://emailtrackingserver.onrender.com/api/attachments/list", "error": "HTTP Error 500: Internal Server Error"}
+{"timestamp": "2026-07-08T14:05:51.237073", "event": "Server Error", "operation": "GET", "url": "https://emailtrackingserver.onrender.com/api/attachments/list", "error": "HTTP Error 500: Internal Server Error"}

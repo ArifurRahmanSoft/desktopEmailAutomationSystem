@@ -1,5 +1,6 @@
-('C:\\Users\\DELL\\Documents\\Codex\\2026-06-27\\reate-a-file-named-hello-txt\\work\\pyinstaller\\Email '
- 'Automation\\Email Automation\\PYZ-00.pyz',
+('C:\\Users\\DELL\\Documents\\Codex\\email automation '
+ 'v2\\EmailAutomation\\work\\pyinstaller\\Email Automation\\Email '
+ 'Automation\\PYZ-00.pyz',
  [('__future__', 'C:\\Python314\\Lib\\__future__.py', 'PYMODULE'),
   ('_aix_support', 'C:\\Python314\\Lib\\_aix_support.py', 'PYMODULE'),
   ('_ast_unparse', 'C:\\Python314\\Lib\\_ast_unparse.py', 'PYMODULE'),
@@ -13,21 +14,25 @@
   ('_strptime', 'C:\\Python314\\Lib\\_strptime.py', 'PYMODULE'),
   ('_threading_local', 'C:\\Python314\\Lib\\_threading_local.py', 'PYMODULE'),
   ('account_service',
-   'C:\\Users\\DELL\\Documents\\Codex\\2026-06-27\\reate-a-file-named-hello-txt\\account_service.py',
+   'C:\\Users\\DELL\\Documents\\Codex\\email automation '
+   'v2\\EmailAutomation\\account_service.py',
    'PYMODULE'),
   ('annotationlib', 'C:\\Python314\\Lib\\annotationlib.py', 'PYMODULE'),
   ('argparse', 'C:\\Python314\\Lib\\argparse.py', 'PYMODULE'),
   ('ast', 'C:\\Python314\\Lib\\ast.py', 'PYMODULE'),
   ('attachment_library_service',
-   'C:\\Users\\DELL\\Documents\\Codex\\2026-06-27\\reate-a-file-named-hello-txt\\attachment_library_service.py',
+   'C:\\Users\\DELL\\Documents\\Codex\\email automation '
+   'v2\\EmailAutomation\\attachment_library_service.py',
    'PYMODULE'),
   ('base64', 'C:\\Python314\\Lib\\base64.py', 'PYMODULE'),
   ('bisect', 'C:\\Python314\\Lib\\bisect.py', 'PYMODULE'),
   ('bounce_tracking_service',
-   'C:\\Users\\DELL\\Documents\\Codex\\2026-06-27\\reate-a-file-named-hello-txt\\bounce_tracking_service.py',
+   'C:\\Users\\DELL\\Documents\\Codex\\email automation '
+   'v2\\EmailAutomation\\bounce_tracking_service.py',
    'PYMODULE'),
   ('build_info',
-   'C:\\Users\\DELL\\Documents\\Codex\\2026-06-27\\reate-a-file-named-hello-txt\\build_info.py',
+   'C:\\Users\\DELL\\Documents\\Codex\\email automation '
+   'v2\\EmailAutomation\\build_info.py',
    'PYMODULE'),
   ('bz2', 'C:\\Python314\\Lib\\bz2.py', 'PYMODULE'),
   ('calendar', 'C:\\Python314\\Lib\\calendar.py', 'PYMODULE'),
@@ -49,7 +54,8 @@
   ('contextvars', 'C:\\Python314\\Lib\\contextvars.py', 'PYMODULE'),
   ('copy', 'C:\\Python314\\Lib\\copy.py', 'PYMODULE'),
   ('credential_service',
-   'C:\\Users\\DELL\\Documents\\Codex\\2026-06-27\\reate-a-file-named-hello-txt\\credential_service.py',
+   'C:\\Users\\DELL\\Documents\\Codex\\email automation '
+   'v2\\EmailAutomation\\credential_service.py',
    'PYMODULE'),
   ('csv', 'C:\\Python314\\Lib\\csv.py', 'PYMODULE'),
   ('ctypes', 'C:\\Python314\\Lib\\ctypes\\__init__.py', 'PYMODULE'),
@@ -733,13 +739,18 @@
   ('pathlib._os', 'C:\\Python314\\Lib\\pathlib\\_os.py', 'PYMODULE'),
   ('pickle', 'C:\\Python314\\Lib\\pickle.py', 'PYMODULE'),
   ('placeholder_service',
-   'C:\\Users\\DELL\\Documents\\Codex\\2026-06-27\\reate-a-file-named-hello-txt\\placeholder_service.py',
+   'C:\\Users\\DELL\\Documents\\Codex\\email automation '
+   'v2\\EmailAutomation\\placeholder_service.py',
    'PYMODULE'),
   ('platform', 'C:\\Python314\\Lib\\platform.py', 'PYMODULE'),
   ('pprint', 'C:\\Python314\\Lib\\pprint.py', 'PYMODULE'),
   ('py_compile', 'C:\\Python314\\Lib\\py_compile.py', 'PYMODULE'),
   ('quopri', 'C:\\Python314\\Lib\\quopri.py', 'PYMODULE'),
   ('random', 'C:\\Python314\\Lib\\random.py', 'PYMODULE'),
+  ('reply_tracking_service',
+   'C:\\Users\\DELL\\Documents\\Codex\\email automation '
+   'v2\\EmailAutomation\\reply_tracking_service.py',
+   'PYMODULE'),
   ('secrets', 'C:\\Python314\\Lib\\secrets.py', 'PYMODULE'),
   ('selectors', 'C:\\Python314\\Lib\\selectors.py', 'PYMODULE'),
   ('shutil', 'C:\\Python314\\Lib\\shutil.py', 'PYMODULE'),
@@ -778,7 +789,8 @@
   ('tokenize', 'C:\\Python314\\Lib\\tokenize.py', 'PYMODULE'),
   ('tracemalloc', 'C:\\Python314\\Lib\\tracemalloc.py', 'PYMODULE'),
   ('tracking_sync_service',
-   'C:\\Users\\DELL\\Documents\\Codex\\2026-06-27\\reate-a-file-named-hello-txt\\tracking_sync_service.py',
+   'C:\\Users\\DELL\\Documents\\Codex\\email automation '
+   'v2\\EmailAutomation\\tracking_sync_service.py',
    'PYMODULE'),
   ('typing', 'C:\\Python314\\Lib\\typing.py', 'PYMODULE'),
   ('urllib', 'C:\\Python314\\Lib\\urllib\\__init__.py', 'PYMODULE'),

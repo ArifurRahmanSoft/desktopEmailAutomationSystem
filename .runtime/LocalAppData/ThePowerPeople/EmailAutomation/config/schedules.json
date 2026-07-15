@@ -1,0 +1,16 @@
+[
+  {
+    "id": "40c7ae90-e9d6-4802-9cc0-2a4859804397",
+    "name": "test",
+    "excel_file": "F:/CODEX/Email_Automation_V2/mail_automation_v2.xlsx",
+    "days": [
+      "Saturday"
+    ],
+    "time": "09:00",
+    "max_emails": 10,
+    "attachment_source": "Attachment Library",
+    "attachment_ids": [],
+    "local_attachment_paths": [],
+    "enabled": true
+  }
+]

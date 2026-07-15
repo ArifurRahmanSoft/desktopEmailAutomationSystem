@@ -77,16 +77,14 @@ class AttachmentLibraryTests(unittest.TestCase):
             service=AttachmentLibraryService("https://server.test",logs,request_opener=failed)
             with self.assertRaisesRegex(RuntimeError,"Attachment mapping registration failed"):
                 service.register_tracking_attachments("tracking-1",["attachment-1"])
-            text=next(logs.glob("attachment-*.log")).read_text(encoding="utf-8")
-            self.assertIn("mapping API offline",text)
-            self.assertIn("Register Attachment Mapping",text)
+            self.assertFalse(list(logs.glob("*.log")))
 
-    def test_server_failure_is_friendly_and_logged(self):
+    def test_server_failure_is_friendly_without_local_logs(self):
         def failed(*_, **__): raise OSError("offline")
         with tempfile.TemporaryDirectory() as temp:
             logs=Path(temp)/"logs";service=AttachmentLibraryService("https://server.test",logs,request_opener=failed)
             with self.assertRaisesRegex(RuntimeError,"server is unavailable"):service.list_attachments()
-            self.assertIn("offline",next(logs.glob("attachment-*.log")).read_text(encoding="utf-8"))
+            self.assertFalse(list(logs.glob("*.log")))
 
 
 if __name__=="__main__":unittest.main()

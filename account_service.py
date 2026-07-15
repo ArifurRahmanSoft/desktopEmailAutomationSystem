@@ -40,6 +40,9 @@ class AccountService:
             normalized["imap_port"] = int(normalized.get("imap_port") or 993)
             normalized["imap_encryption"] = normalized.get("imap_encryption") or "SSL/TLS"
         normalized["enabled"] = bool(normalized.get("enabled", True))
+        normalized["sender_alias"] = str(normalized.get("sender_alias") or "").strip().lower()
+        if normalized["provider"] != "Gmail" or normalized["smtp_host"].casefold() != "smtp.gmail.com":
+            normalized["sender_alias"] = ""
         return normalized
 
     def _save(self, accounts):
@@ -53,7 +56,7 @@ class AccountService:
                 return account
         return None
 
-    def save_account(self, name, email, password="", enabled=True, original_email=None, provider="Gmail", smtp_host=None, smtp_port=None, encryption=None, imap_host=None, imap_port=None, imap_encryption=None):
+    def save_account(self, name, email, password="", enabled=True, original_email=None, provider="Gmail", smtp_host=None, smtp_port=None, encryption=None, imap_host=None, imap_port=None, imap_encryption=None, sender_alias=""):
         email = email.strip().lower()
         if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
             raise ValueError("A valid email address is required.")
@@ -62,7 +65,11 @@ class AccountService:
         if provider == "Gmail":
             smtp_host, smtp_port, encryption = "smtp.gmail.com", 587, "STARTTLS"
             imap_host, imap_port, imap_encryption = "imap.gmail.com", 993, "SSL/TLS"
+            sender_alias = str(sender_alias or "").strip().lower()
+            if sender_alias and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", sender_alias):
+                raise ValueError("Sender Alias must be a valid email address.")
         else:
+            sender_alias = ""
             smtp_host = str(smtp_host or "").strip()
             if not smtp_host:
                 raise ValueError("SMTP Host cannot be empty.")
@@ -79,7 +86,7 @@ class AccountService:
             except (TypeError, ValueError): raise ValueError("IMAP Port must be numeric.")
             if not 1 <= imap_port <= 65535: raise ValueError("IMAP Port must be between 1 and 65535.")
             if imap_encryption not in self.ENCRYPTION_TYPES: raise ValueError("Invalid IMAP encryption type.")
-        account_values = {"name": name.strip() or email, "display_name": name.strip() or email, "email": email, "provider": provider, "smtp_host": smtp_host, "smtp_port": smtp_port, "encryption": encryption, "imap_host": imap_host, "imap_port": imap_port, "imap_encryption": imap_encryption, "enabled": bool(enabled)}
+        account_values = {"name": name.strip() or email, "display_name": name.strip() or email, "email": email, "sender_alias": sender_alias, "provider": provider, "smtp_host": smtp_host, "smtp_port": smtp_port, "encryption": encryption, "imap_host": imap_host, "imap_port": imap_port, "imap_encryption": imap_encryption, "enabled": bool(enabled)}
         accounts = self.list_accounts()
         old_key = (original_email or email).strip().lower()
         existing = next((a for a in accounts if a["email"].lower() == old_key), None)
@@ -124,6 +131,12 @@ class AccountService:
         if not account or not password:
             return None
         return {**account, "password": password}
+
+    @staticmethod
+    def sender_address(configuration):
+        if configuration.get("provider") == "Gmail" and str(configuration.get("smtp_host") or "").strip().casefold() == "smtp.gmail.com":
+            return str(configuration.get("sender_alias") or "").strip().lower() or configuration["email"]
+        return configuration["email"]
 
     def imap_configuration(self, email):
         account = self.find(email, enabled_only=True)

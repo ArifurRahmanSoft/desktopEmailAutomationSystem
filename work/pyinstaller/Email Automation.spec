@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['C:\\Users\\DELL\\Documents\\Codex\\2026-06-27\\reate-a-file-named-hello-txt\\email_automation.py'],
+    ['C:\\Users\\DELL\\Documents\\Codex\\email automation v2\\EmailAutomation\\email_automation.py'],
     pathex=[],
     binaries=[],
     datas=[],

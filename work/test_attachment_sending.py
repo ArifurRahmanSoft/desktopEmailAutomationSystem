@@ -1,5 +1,4 @@
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -55,14 +54,5 @@ class AttachmentSendingTests(unittest.TestCase):
         with patch.object(app,"attachment_library_service",return_value=library):
             with self.assertRaisesRegex(RuntimeError,"mapping rejected"):
                 app.register_attachment_mapping("tracking-1",[{"id":"a1","file_name":"Proposal.pdf"}])
-
-    def test_attachment_send_log_contains_required_audit_fields(self):
-        with tempfile.TemporaryDirectory() as temp:
-            installed=Path(temp);(installed/"config").mkdir()
-            attachments=[{"id":"a1","file_name":"Proposal.pdf"}];urls=["https://server/download/t/a1"]
-            with patch.object(app,"install_dir",return_value=installed):app.attachment_send_log("track-1","person@example.com",attachments,urls)
-            text=next((installed/"logs").glob("attachment-send-*.log")).read_text(encoding="utf-8")
-            self.assertIn('"tracking_id": "track-1"',text);self.assertIn('"recipient": "person@example.com"',text);self.assertIn('"attachment_ids": ["a1"]',text);self.assertIn('"original_file_names": ["Proposal.pdf"]',text);self.assertIn(urls[0],text)
-
 
 if __name__=="__main__":unittest.main()

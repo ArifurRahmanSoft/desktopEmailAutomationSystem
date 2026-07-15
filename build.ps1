@@ -13,6 +13,6 @@ foreach ($Name in $Names) {
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed for $Name" }
 }
 Copy-Item (Join-Path $Project 'README.md') $Output -Force
-foreach ($Folder in @('config','logs','backup','reports')) { New-Item -ItemType Directory -Path (Join-Path $Output $Folder) -Force | Out-Null }
+foreach ($Folder in @('config','backup')) { New-Item -ItemType Directory -Path (Join-Path $Output $Folder) -Force | Out-Null }
 & 'C:\Python314\python.exe' -c "import sys; sys.path.insert(0, r'$Project'); from email_automation import sample_workbook; sample_workbook(r'$Output\sample_mail_list.xlsx')"
 if ($LASTEXITCODE -ne 0) { throw 'Sample workbook creation failed' }

@@ -1,0 +1,1 @@
+﻿print("Hello from EmailAutomation Version 2")

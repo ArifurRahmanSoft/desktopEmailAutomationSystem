@@ -2,7 +2,6 @@ import http.client
 import json
 import mimetypes
 import secrets
-from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
@@ -11,15 +10,12 @@ from urllib.request import Request, urlopen
 class AttachmentLibraryService:
     def __init__(self, base_url, log_folder, connection_factory=None, request_opener=None):
         self.base_url = base_url.rstrip("/")
-        self.log_folder = Path(log_folder)
+        self.log_folder = Path(log_folder) if log_folder else None
         self.connection_factory = connection_factory
         self.request_opener = request_opener or urlopen
 
     def _log(self, event, **values):
-        self.log_folder.mkdir(parents=True, exist_ok=True)
-        path = self.log_folder / f"attachment-{datetime.now():%Y-%m-%d}.log"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"timestamp": datetime.now().isoformat(), "event": event, **values}, ensure_ascii=False, default=str) + "\n")
+        return None
 
     def _request_json(self, method, path, payload=None):
         url = self.base_url + path
